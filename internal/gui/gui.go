@@ -32,7 +32,10 @@ import (
 //go:embed static
 var static embed.FS
 
-const cookieName = "mihomac_token"
+// Cookies are shared across ports on 127.0.0.1, so each instance's cookie is
+// named after its port; otherwise opening one instance's GUI would log you
+// out of another's.
+const cookieBase = "mihomac_token"
 
 // Scopes a token can carry.
 const (
@@ -101,6 +104,7 @@ func Handler(addr string, tok Tokens, api http.Handler) http.Handler {
 func guard(addr string, tok Tokens, next http.Handler) http.Handler {
 	_, port, _ := net.SplitHostPort(addr)
 	allowedHosts := map[string]bool{"127.0.0.1:" + port: true, "localhost:" + port: true}
+	cookieName := cookieBase + "_" + port
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !allowedHosts[r.Host] {
@@ -129,7 +133,7 @@ func guard(addr string, tok Tokens, next http.Handler) http.Handler {
 			return
 		}
 
-		scope := scopeOf(r, tok)
+		scope := scopeOf(r, tok, cookieName)
 		if scope == "" {
 			http.Error(w, "unauthorized: open the URL printed by `mihomac status`", http.StatusUnauthorized)
 			return
@@ -148,7 +152,7 @@ func guard(addr string, tok Tokens, next http.Handler) http.Handler {
 	})
 }
 
-func scopeOf(r *http.Request, tok Tokens) string {
+func scopeOf(r *http.Request, tok Tokens, cookieName string) string {
 	var presented string
 	if bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
 		presented = bearer

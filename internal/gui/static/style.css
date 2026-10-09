@@ -123,3 +123,5 @@ tr.closed td { color: var(--muted); }
 .verdict { padding: 10px; border-radius: 8px; background: var(--code-bg); margin-top: 8px; }
 .ok-text { color: var(--ok); }
 .bad-text { color: var(--bad); }
+
+.log { max-height: 320px; overflow: auto; background: var(--code-bg); padding: 10px; border-radius: 6px; white-space: pre-wrap; word-break: break-all; margin: 8px 0 0; }

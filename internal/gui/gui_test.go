@@ -68,6 +68,9 @@ func TestTokenQueryBecomesCookie(t *testing.T) {
 	if len(cookies) != 1 || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode {
 		t.Fatalf("cookie = %+v", cookies)
 	}
+	if !strings.HasPrefix(cookies[0].Name, "mihomac_token_") {
+		t.Errorf("cookie %q is not scoped to the instance's port", cookies[0].Name)
+	}
 	req := newReq(http.MethodGet, "/", "")
 	req.AddCookie(cookies[0])
 	if rec := serve(t, req); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "Clash Mihomac") {

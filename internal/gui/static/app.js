@@ -300,6 +300,34 @@ async function loadNetwork() {
   } catch { /* ignore */ }
 }
 
+async function loadInstances() {
+  let list;
+  try { list = await api("/api/instances"); } catch { return; }
+  $("#instance-table tbody").replaceChildren(...list.map((i) => el("tr", { class: i.current ? "active" : "" },
+    el("td", {}, i.name, i.label !== i.name ? ` (${i.label})` : "", i.current ? " · this one" : ""),
+    el("td", {}, i.running ? `running (pid ${i.pid})` : "stopped"), el("td", {}, i.mode || "–"),
+    el("td", { class: "mono" }, i.core_version), el("td", { class: "mono" }, i.mixed_port), el("td", { class: "mono" }, i.tun_device))));
+  const sel = $("#log-instance");
+  if (sel.options.length !== list.length) {
+    const keep = sel.value;
+    sel.replaceChildren(...list.map((i) => el("option", { value: i.name }, i.name)));
+    sel.value = keep || (list.find((i) => i.current) || list[0]).name;
+  }
+}
+
+async function loadLog() {
+  const q = new URLSearchParams({ instance: $("#log-instance").value, source: $("#log-source").value, lines: "200" });
+  try {
+    const r = await api("/api/logs?" + q);
+    $("#log-output").textContent = r.lines.length ? r.lines.join("\n") : "(empty)";
+  } catch (e) {
+    $("#log-output").textContent = e.message;
+  }
+}
+$("#log-refresh").addEventListener("click", loadLog);
+$("#log-instance").addEventListener("change", loadLog);
+$("#log-source").addEventListener("change", loadLog);
+
 $("#probe-form").addEventListener("submit", (e) => {
   e.preventDefault();
   runProbe($("#probe-url").value, $("#probe-result"));
@@ -325,7 +353,7 @@ function refresh() {
   loadProposals();
   if (currentTab === "connections") { loadConnections(); if (selectedConn) loadDetail(); }
   if (currentTab === "rules") { loadRules(); loadTargets(); updateValueHints(); }
-  if (currentTab === "network") loadNetwork();
+  if (currentTab === "network") { loadNetwork(); loadInstances(); }
 }
 
 refresh();

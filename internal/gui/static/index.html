@@ -113,6 +113,25 @@
         </div>
       </div>
       <div class="card">
+        <h2>Instances and profiles</h2>
+        <p class="muted small">Each runs side by side with its own ports, directory, TUN device, and mihomo version. Manage them with <code>mihomac profile</code> and <code>mihomac core</code>.</p>
+        <div class="table-wrap">
+          <table id="instance-table">
+            <thead><tr><th>Name</th><th>Status</th><th>Mode</th><th>Core</th><th>Proxy port</th><th>TUN</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Logs</h2>
+        <div class="toolbar">
+          <select id="log-instance"></select>
+          <select id="log-source"><option value="daemon">daemon</option><option value="core">mihomo core</option></select>
+          <button id="log-refresh" type="button">Refresh</button>
+        </div>
+        <pre id="log-output" class="mono log"></pre>
+      </div>
+      <div class="card">
         <h2>Is the proxy the problem?</h2>
         <form id="probe-form" class="toolbar">
           <input id="probe-url" type="url" placeholder="https://example.com" required>
