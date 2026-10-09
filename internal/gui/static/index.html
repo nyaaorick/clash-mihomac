@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Clash Mihomac</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <h1>Clash Mihomac</h1>
+    <span id="instance" class="muted"></span>
+    <span id="state" class="pill">loading…</span>
+    <nav>
+      <button data-tab="overview" class="active">Overview</button>
+      <button data-tab="connections">Connections</button>
+      <button data-tab="rules">Rules <span id="pending-badge" class="badge" hidden></span></button>
+      <button data-tab="network">Network</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="tab-overview">
+      <div class="card">
+        <h2>Mode</h2>
+        <div id="modes" class="segmented"></div>
+        <p id="mode-help" class="muted"></p>
+        <p id="mode-error" class="error" hidden></p>
+      </div>
+      <div class="card">
+        <h2>Status</h2>
+        <dl id="status"></dl>
+      </div>
+      <div class="card" id="warnings-card" hidden>
+        <h2>Config warnings</h2>
+        <ul id="warnings"></ul>
+      </div>
+      <div class="card">
+        <h2>Recent events</h2>
+        <ul id="events" class="events"></ul>
+      </div>
+    </section>
+
+    <section id="tab-connections" hidden>
+      <div class="toolbar">
+        <input id="conn-filter" type="search" placeholder="Filter by host, IP, app, rule, or node">
+        <label class="muted"><input id="conn-pause" type="checkbox"> Pause</label>
+      </div>
+      <div class="split">
+        <div class="table-wrap">
+          <table id="conn-table">
+            <thead><tr><th>Time</th><th>App</th><th>Destination</th><th>Rule</th><th>Route</th><th>↓</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <aside id="conn-detail" class="card detail">
+          <p class="muted">Select a connection to see where it went and why.</p>
+        </aside>
+      </div>
+    </section>
+
+    <section id="tab-rules" hidden>
+      <div class="card" id="proposals-card" hidden>
+        <h2>Pending proposals</h2>
+        <div id="proposals"></div>
+      </div>
+      <div class="card">
+        <h2>Add a rule</h2>
+        <form id="rule-form" class="rule-form">
+          <select id="rule-type"></select>
+          <input id="rule-value" list="app-list" placeholder="value" required>
+          <datalist id="app-list"></datalist>
+          <input id="rule-target" list="target-list" placeholder="target" required>
+          <datalist id="target-list"></datalist>
+          <input id="rule-note" placeholder="note (optional)">
+          <button type="submit">Add</button>
+        </form>
+        <p class="muted small">Targets: DIRECT, REJECT, a proxy or group, or <code>iface:en1</code> to go direct out a specific interface. New rules take precedence over older ones.</p>
+        <p id="rule-error" class="error" hidden></p>
+      </div>
+      <div class="card">
+        <h2>Rule packs</h2>
+        <div id="packs"></div>
+      </div>
+      <div class="card">
+        <h2>Final rule list <span class="muted small">(first match wins)</span></h2>
+        <div class="table-wrap">
+          <table id="rules-table">
+            <thead><tr><th>#</th><th>Rule</th><th>Source</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-network" hidden>
+      <div class="card">
+        <h2>Interfaces</h2>
+        <div class="table-wrap">
+          <table id="iface-table">
+            <thead><tr><th>Name</th><th>Role</th><th>Addresses</th><th>Routes</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Proxies and groups</h2>
+        <div class="table-wrap">
+          <table id="node-table">
+            <thead><tr><th>Name</th><th>Type</th><th>Selected</th><th>Latency</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Is the proxy the problem?</h2>
+        <form id="probe-form" class="toolbar">
+          <input id="probe-url" type="url" placeholder="https://example.com" required>
+          <button type="submit">Compare direct vs proxied</button>
+        </form>
+        <div id="probe-result"></div>
+      </div>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

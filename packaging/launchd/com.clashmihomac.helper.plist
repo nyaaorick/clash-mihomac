@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Installed by `make install-helper`, which replaces __UID__ with the installing user's uid. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.clashmihomac.helper</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Library/PrivilegedHelperTools/com.clashmihomac.helper</string>
+		<string>--allow-uid</string>
+		<string>__UID__</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/var/log/com.clashmihomac.helper.log</string>
+</dict>
+</plist>

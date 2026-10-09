@@ -1,0 +1,13 @@
+# Minimal mihomo config for trying Clash Mihomac.
+#
+# Everything goes DIRECT, so this only proves the pipeline works. Add your
+# own proxies, proxy-groups, and rules here. Ports, the controller, and TUN
+# are managed by Clash Mihomac and overridden at runtime.
+
+mode: rule
+log-level: info
+
+proxies: []
+
+rules:
+  - MATCH,DIRECT
