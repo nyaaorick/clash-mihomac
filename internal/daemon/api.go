@@ -30,6 +30,7 @@ func (d *Daemon) api() http.Handler {
 	mux.HandleFunc("POST /api/probe", d.handleProbe)
 	mux.HandleFunc("GET /api/rules", d.handleRules)
 	mux.HandleFunc("POST /api/rules/change", d.handleRuleChange)
+	mux.HandleFunc("POST /api/packs/preview", d.handlePackPreview)
 	mux.HandleFunc("GET /api/proposals", d.handleProposals)
 	mux.HandleFunc("POST /api/proposals", d.handlePropose)
 	mux.HandleFunc("POST /api/proposals/{id}/{decision}", d.handleDecide)
@@ -171,7 +172,7 @@ type RulesView struct {
 func (d *Daemon) handleRules(w http.ResponseWriter, r *http.Request) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	v := RulesView{Set: d.ruleSet, Packs: rules.Packs(), Types: rules.Types}
+	v := RulesView{Set: d.ruleSet, Packs: d.ruleSet.AllPacks(), Types: rules.Types}
 	for i, cr := range d.ctrlRules {
 		c := CompiledRule{Position: i + 1, Line: ruleLine(cr)}
 		if i < len(d.sources) {

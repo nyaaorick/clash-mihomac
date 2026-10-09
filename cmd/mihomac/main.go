@@ -36,6 +36,7 @@ Running:
 
 Routing:
   rules             List rules; add, remove, or toggle packs (rules -h)
+  packs             Install, update, and remove community rule packs (packs -h)
   proposals         List, apply, or reject proposed rule changes
 
 Diagnostics:
@@ -66,7 +67,7 @@ func main() {
 		"restore-network": cmdRestoreNetwork,
 		"rules":           cmdRules, "proposals": cmdProposals,
 		"connections": cmdConnections, "diagnose": cmdDiagnose, "probe": cmdProbe, "interfaces": cmdInterfaces,
-		"mcp": cmdMCP, "core": cmdCore, "helper": cmdHelper, "profile": cmdProfile, "logs": cmdLogs,
+		"mcp": cmdMCP, "core": cmdCore, "helper": cmdHelper, "profile": cmdProfile, "packs": cmdPacks, "logs": cmdLogs,
 		"run":       cmdRun,      // internal: the daemon process started by `start`
 		"core-exec": cmdCoreExec, // internal: wrapper that ties mihomo to the daemon
 	}

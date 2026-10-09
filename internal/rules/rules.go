@@ -65,6 +65,9 @@ type Set struct {
 	Packs       []string      `yaml:"packs" json:"packs"`
 	Rules       []Rule        `yaml:"rules" json:"rules"`
 	InternalDNS []InternalDNS `yaml:"internal_dns,omitempty" json:"internal_dns,omitempty"`
+	// Library holds installed community packs. Packs lists which packs,
+	// built in or installed, are enabled.
+	Library []Pack `yaml:"library,omitempty" json:"library,omitempty"`
 }
 
 // Load reads a rule set. A missing file is an empty set.
@@ -109,9 +112,12 @@ var (
 
 // Validate checks that every rule can be compiled safely.
 func (s Set) Validate() error {
+	if err := validateLibrary(s.Library); err != nil {
+		return err
+	}
 	for _, p := range s.Packs {
-		if _, ok := packs[p]; !ok {
-			return fmt.Errorf("unknown rule pack %q (known: %s)", p, strings.Join(PackNames(), ", "))
+		if _, ok := s.pack(p); !ok {
+			return fmt.Errorf("unknown rule pack %q (known: %s)", p, strings.Join(s.PackNames(), ", "))
 		}
 	}
 	for i, r := range s.Rules {
@@ -218,7 +224,8 @@ func Compile(s Set) (Compiled, error) {
 		add(r, Source{Kind: "bypass", Note: r.Note, Index: i + 1})
 	}
 	for _, p := range s.Packs {
-		for i, r := range packs[p].Rules {
+		pk, _ := s.pack(p)
+		for i, r := range pk.Rules {
 			add(r, Source{Kind: "pack", Name: p, Index: i + 1})
 		}
 	}

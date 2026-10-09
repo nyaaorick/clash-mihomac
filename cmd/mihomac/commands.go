@@ -111,12 +111,13 @@ func cmdRules(args []string) error {
 	case "packs":
 		if *enable == "" && *disable == "" {
 			set, _ := rules.Load(inst.Path("rules.yaml"))
-			for _, p := range rules.PackNames() {
+			all := set.AllPacks()
+			for _, p := range set.PackNames() {
 				mark := " "
 				if slices.Contains(set.Packs, p) {
 					mark = "✓"
 				}
-				fmt.Printf("%s %-10s %s\n", mark, p, rules.Packs()[p].Description)
+				fmt.Printf("%s %-16s %s\n", mark, p, all[p].Description)
 			}
 			return nil
 		}

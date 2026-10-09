@@ -21,10 +21,14 @@ var Bypass = []Rule{
 	{Type: TypeIPCIDR, Value: "fe80::/10", Target: "DIRECT", Note: "link-local"},
 }
 
-// Pack is a named, built-in group of rules.
+// Pack is a named group of rules: built in, or installed from a pack file.
 type Pack struct {
-	Description string `json:"description"`
-	Rules       []Rule `json:"rules"`
+	Name        string `yaml:"name,omitempty" json:"name,omitempty"`
+	Version     string `yaml:"version,omitempty" json:"version,omitempty"`
+	Author      string `yaml:"author,omitempty" json:"author,omitempty"`
+	Description string `yaml:"description" json:"description"`
+	Source      string `yaml:"source,omitempty" json:"source,omitempty"` // URL it was installed from
+	Rules       []Rule `yaml:"rules" json:"rules"`
 }
 
 func suffixes(target string, domains ...string) []Rule {
@@ -64,6 +68,7 @@ func PackNames() []string {
 func Packs() map[string]Pack {
 	out := make(map[string]Pack, len(packs))
 	for k, v := range packs {
+		v.Name = k
 		out[k] = v
 	}
 	return out
