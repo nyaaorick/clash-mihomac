@@ -167,6 +167,15 @@ var tools = []tool{
 		schema(map[string]any{"id": map[string]any{"type": "string"}}, "id"), readOnly},
 	{"list_rules", "The final rule list in match order, each with its source (user rule, built-in bypass, rule pack, or config file), plus the user's rule set and available packs.", schema(map[string]any{}), readOnly},
 	{"list_nodes", "Proxies and proxy groups, with each group's current selection and latest latency.", schema(map[string]any{}), readOnly},
+	{"traffic_summary", "Where traffic physically goes: per-app roll-up, the layered path (app → protocol → tunnel → rule → node → NIC → destination), and surprises such as traffic that bypassed TUN, rides another VPN, or leaves through the wrong NIC. Filters narrow it down.",
+		schema(map[string]any{
+			"view":    map[string]any{"type": "string", "enum": []string{"full", "hardware", "software"}},
+			"process": map[string]any{"type": "string"}, "proto": map[string]any{"type": "string", "enum": []string{"tcp", "udp", "unix", "icmp"}},
+			"iface": map[string]any{"type": "string"}, "rule": map[string]any{"type": "string"}, "node": map[string]any{"type": "string"},
+			"routing": map[string]any{"type": "string", "enum": []string{"proxied", "direct"}},
+			"history": map[string]any{"type": "boolean", "description": "Use stored history instead of live flows"},
+			"range":   map[string]any{"type": "string", "description": "History window, e.g. 15m or 6h"},
+		}), readOnly},
 	{"node_health", "Health of each proxy node from the background monitor: healthy, degraded, down, or blocked, with uptime, average latency, and the reason. A blocked node is failing with DNS poisoning, TCP resets, or TLS handshake failures. Pass a node name for its recent checks.",
 		schema(map[string]any{"node": map[string]any{"type": "string"}}), readOnly},
 	{"list_interfaces", "Network interfaces with addresses, route counts, and roles (default route, VPN, this instance's TUN).", schema(map[string]any{}), readOnly},
@@ -222,6 +231,17 @@ func (s *Server) call(ctx context.Context, name string, raw json.RawMessage) (st
 		err = s.API.Get(ctx, "/api/rules", &out)
 	case "list_nodes":
 		err = s.API.Get(ctx, "/api/nodes", &out)
+	case "traffic_summary":
+		q := url.Values{}
+		for _, k := range []string{"view", "process", "proto", "iface", "rule", "node", "routing", "range"} {
+			if v := str(k); v != "" {
+				q.Set(k, v)
+			}
+		}
+		if h, _ := args["history"].(bool); h {
+			q.Set("mode", "history")
+		}
+		err = s.API.Get(ctx, "/api/traffic?"+q.Encode(), &out)
 	case "node_health":
 		path := "/api/health"
 		if n := str("node"); n != "" {
