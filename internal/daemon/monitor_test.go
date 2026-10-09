@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,12 +17,15 @@ import (
 
 func TestCheckNodesRecordsHealthyNodes(t *testing.T) {
 	var asked []string
+	var askedMu sync.Mutex
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/delay") || r.Header.Get("Authorization") != "Bearer s3cret" {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
+		askedMu.Lock()
 		asked = append(asked, r.URL.EscapedPath())
+		askedMu.Unlock()
 		json.NewEncoder(w).Encode(map[string]int{"delay": 42})
 	}))
 	defer srv.Close()
