@@ -25,11 +25,13 @@ import (
 	"time"
 
 	"github.com/nyaaorick/clash-mihomac/internal/gui"
+	"github.com/nyaaorick/clash-mihomac/internal/health"
 	"github.com/nyaaorick/clash-mihomac/internal/helper"
 	"github.com/nyaaorick/clash-mihomac/internal/instance"
 	"github.com/nyaaorick/clash-mihomac/internal/netstate"
 	"github.com/nyaaorick/clash-mihomac/internal/rules"
 	"github.com/nyaaorick/clash-mihomac/internal/runtimecfg"
+	"github.com/nyaaorick/clash-mihomac/internal/vps"
 )
 
 // Options configure a daemon run.
@@ -53,6 +55,9 @@ type Daemon struct {
 	ctrl      controller
 	tracker   *Tracker
 	proposals *Proposals
+	health    *health.History
+	traffic   *trafficState
+	vps       *vpsState
 	startedAt time.Time
 	coreDied  chan error
 
@@ -99,8 +104,11 @@ func Run(ctx context.Context, o Options) error {
 		ctrl:      controller{addr: fmt.Sprintf("127.0.0.1:%d", inst.ControllerPort), secret: secret},
 		tracker:   NewTracker(),
 		proposals: LoadProposals(inst.Path("proposals.json")),
+		health:    health.LoadHistory(inst.Path("health.json")),
 		coreDied:  make(chan error, 1),
 	}
+	d.initTraffic()
+	d.initVPS()
 
 	// Claim the GUI port first so a port clash fails before anything changes.
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", inst.GUIPort))
@@ -147,6 +155,9 @@ func Run(ctx context.Context, o Options) error {
 
 	go d.pollConnections(ctx)
 	go d.followLogs(ctx)
+	go d.monitorHealth(ctx)
+	go d.pollTraffic(ctx)
+	go d.monitorMachines(ctx)
 
 	health := time.NewTicker(2 * time.Second)
 	defer health.Stop()
@@ -302,6 +313,23 @@ func (d *Daemon) ApplyRules(ctx context.Context, set rules.Set) error {
 	return nil
 }
 
+// ReloadConfig rebuilds the runtime config from the saved rules and
+// imported nodes and hot-reloads it, e.g. after a node was imported.
+func (d *Daemon) ReloadConfig(ctx context.Context) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	res, err := d.build(d.mode, d.ruleSet)
+	if err != nil {
+		return err
+	}
+	if err := d.reload(ctx, res.Config); err != nil {
+		return err
+	}
+	d.sources, d.warnings = res.Sources, res.Warnings
+	d.refreshRules(ctx)
+	return nil
+}
+
 func (d *Daemon) reload(ctx context.Context, cfg []byte) error {
 	if d.mode == runtimecfg.ModeTUN {
 		return d.helperCall(ctx, "tun-reload", helper.TUNReloadArgs{Instance: d.inst.Name, Config: string(cfg)}, nil)
@@ -323,7 +351,11 @@ func (d *Daemon) build(mode string, set rules.Set) (runtimecfg.Result, error) {
 	if err != nil {
 		return runtimecfg.Result{}, err
 	}
-	return runtimecfg.Build(user, runtimecfg.Options{
+	var extra []map[string]any
+	if nodes, err := vps.LoadNodes(d.inst.Path("nodes.yaml")); err == nil {
+		extra = vps.Proxies(nodes)
+	}
+	return runtimecfg.Build(user, runtimecfg.Options{ExtraProxies: extra,
 		MixedPort: d.inst.MixedPort, ControllerPort: d.inst.ControllerPort, Secret: d.ctrl.secret,
 		Mode: mode, TUNDevice: d.inst.TUNDevice, TUNAddress: d.inst.TUNAddress, RouteAddress: d.o.RouteAddress, Rules: &compiled,
 	})

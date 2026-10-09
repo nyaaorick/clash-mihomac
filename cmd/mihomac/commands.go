@@ -111,12 +111,13 @@ func cmdRules(args []string) error {
 	case "packs":
 		if *enable == "" && *disable == "" {
 			set, _ := rules.Load(inst.Path("rules.yaml"))
-			for _, p := range rules.PackNames() {
+			all := set.AllPacks()
+			for _, p := range set.PackNames() {
 				mark := " "
 				if slices.Contains(set.Packs, p) {
 					mark = "✓"
 				}
-				fmt.Printf("%s %-10s %s\n", mark, p, rules.Packs()[p].Description)
+				fmt.Printf("%s %-16s %s\n", mark, p, all[p].Description)
 			}
 			return nil
 		}
@@ -438,10 +439,19 @@ func cmdInterfaces(args []string) error {
 func cmdMCP(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
 	name := instanceFlag(fs)
+	setup := fs.Bool("setup", false, "print setup instructions for Claude, Cursor, and other MCP clients, then exit")
 	fs.Parse(args)
 	_, inst, err := resolve(*name)
 	if err != nil {
 		return err
+	}
+	if *setup {
+		exe, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		fmt.Print(mcp.SetupInstructions(exe, inst.Name))
+		return nil
 	}
 	api, err := client.ForInstance(inst, client.TokenAgent)
 	if err != nil {

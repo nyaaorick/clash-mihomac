@@ -63,7 +63,7 @@ func TestHandshakeAndToolList(t *testing.T) {
 	for _, tl := range list {
 		names[tl.(map[string]any)["name"].(string)] = true
 	}
-	for _, want := range []string{"list_connections", "inspect_connection", "propose_rule_change", "probe_url"} {
+	for _, want := range []string{"list_connections", "inspect_connection", "propose_rule_change", "probe_url", "node_health"} {
 		if !names[want] {
 			t.Errorf("missing tool %s", want)
 		}
@@ -90,5 +90,23 @@ func TestInspectLeadsWithExplanation(t *testing.T) {
 	text := resps[0]["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
 	if !strings.HasPrefix(text, "curl connected to example.com:443.") {
 		t.Errorf("text = %s", text)
+	}
+}
+
+type pathAPI struct{ gets []string }
+
+func (p *pathAPI) Get(_ context.Context, path string, out any) error {
+	p.gets = append(p.gets, path)
+	return json.Unmarshal([]byte(`{"nodes":[]}`), out)
+}
+func (p *pathAPI) Post(context.Context, string, any, any) error { return nil }
+
+func TestNodeHealthTool(t *testing.T) {
+	api := &pathAPI{}
+	run(t, api,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"node_health","arguments":{}}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"node_health","arguments":{"node":"hk/1 a"}}}`)
+	if len(api.gets) != 2 || api.gets[0] != "/api/health" || api.gets[1] != "/api/health/hk%2F1%20a" {
+		t.Errorf("paths = %v", api.gets)
 	}
 }

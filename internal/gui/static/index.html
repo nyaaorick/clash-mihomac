@@ -15,6 +15,8 @@
       <button data-tab="overview" class="active">Overview</button>
       <button data-tab="connections">Connections</button>
       <button data-tab="rules">Rules <span id="pending-badge" class="badge" hidden></span></button>
+      <button data-tab="servers">Servers</button>
+      <button data-tab="traffic">Traffic</button>
       <button data-tab="network">Network</button>
     </nav>
   </header>
@@ -81,6 +83,21 @@
       <div class="card">
         <h2>Rule packs</h2>
         <div id="packs"></div>
+        <details id="pack-install">
+          <summary>Install a community pack</summary>
+          <form id="pack-form" class="pack-form">
+            <input id="pack-url" type="url" placeholder="https://example.com/pack.yaml">
+            <textarea id="pack-yaml" rows="6" class="mono" placeholder="…or paste a pack file here"></textarea>
+            <div id="pack-map"></div>
+            <label class="muted"><input id="pack-enable" type="checkbox" checked> Enable after installing</label>
+            <div class="actions"><button type="submit">Preview</button></div>
+          </form>
+          <p id="pack-error" class="error" hidden></p>
+          <div id="pack-preview" hidden>
+            <pre id="pack-diff" class="mono"></pre>
+            <div class="actions"><button id="pack-apply" class="primary" type="button">Install</button></div>
+          </div>
+        </details>
       </div>
       <div class="card">
         <h2>Final rule list <span class="muted small">(first match wins)</span></h2>
@@ -90,6 +107,107 @@
             <tbody></tbody>
           </table>
         </div>
+      </div>
+    </section>
+
+    <section id="tab-servers" hidden>
+      <div class="card">
+        <h2>Your servers</h2>
+        <p class="muted small">Servers are checked every few minutes over SSH. Nothing is installed on them beyond the proxy itself, and every change is previewed first.</p>
+        <div id="machines"></div>
+        <div id="machine-panel" hidden></div>
+      </div>
+      <div class="card">
+        <h2>Set up a new server</h2>
+        <p class="muted small">Enter the IPv4 address and root password of a fresh VPS. The password is used for this setup only and is never stored; afterwards the server is managed with a key.</p>
+        <form id="vps-form" class="pack-form">
+          <input id="vps-host" placeholder="Server IPv4 address" required autocomplete="off">
+          <input id="vps-password" type="password" placeholder="Root password" required autocomplete="off">
+          <input id="vps-name" placeholder="Name (optional)" autocomplete="off">
+          <details><summary>Advanced</summary>
+            <div class="pack-form">
+              <input id="vps-ssh-port" type="number" placeholder="SSH port (22)">
+              <input id="vps-node-port" type="number" placeholder="Proxy port (443)">
+              <input id="vps-sni" placeholder="Reality disguise site (www.microsoft.com)">
+              <input id="vps-sha" placeholder="Proxy release SHA-256 (required until one is pinned)" class="mono">
+              <select id="vps-mode"><option value="">Mode: decide from what the server has</option><option>install</option><option>repair</option><option>upgrade</option><option>reinstall</option></select>
+            </div>
+          </details>
+          <div class="actions"><button type="submit">Check the server and show the plan</button></div>
+        </form>
+        <p id="vps-error" class="error" hidden></p>
+        <div id="vps-plan" hidden></div>
+        <pre id="vps-log" class="mono log" hidden></pre>
+      </div>
+      <div class="card">
+        <h2>Import nodes</h2>
+        <p class="muted small">From share links (vless://, vmess://, trojan://, ss://, hysteria2://), a subscription, or a QR code image. Imported nodes are kept apart from your config file.</p>
+        <form id="import-form" class="pack-form">
+          <textarea id="import-text" rows="4" class="mono" placeholder="Paste share links or a subscription here"></textarea>
+          <label class="muted small">…or a QR code image: <input id="import-image" type="file" accept="image/png,image/jpeg"></label>
+          <div class="actions"><button type="submit">Preview</button></div>
+        </form>
+        <p id="import-error" class="error" hidden></p>
+        <div id="import-preview" hidden></div>
+      </div>
+    </section>
+
+    <section id="tab-traffic" hidden>
+      <div class="card">
+        <h2>Where traffic physically goes</h2>
+        <p class="muted small">Each band is a group of flows; width is bytes. Left to right: the app, its protocol and socket type, the tunnel that captured it, the rule that matched, the node, the physical NIC, and the destination. Click a box to filter by it.</p>
+        <div class="toolbar">
+          <select id="tr-view" title="Which layers to show">
+            <option value="full">Full path</option><option value="hardware">Hardware (tunnels and NICs)</option><option value="software">Software (apps and protocols)</option>
+          </select>
+          <select id="tr-mode"><option value="live">Live</option><option value="history">History</option></select>
+          <select id="tr-range" hidden><option value="5m">last 5 min</option><option value="15m" selected>last 15 min</option><option value="1h">last hour</option><option value="6h">last 6 hours</option><option value="24h">last 24 hours</option></select>
+          <select id="tr-proto"><option value="">any protocol</option><option value="tcp">TCP</option><option value="udp">UDP</option><option value="unix">Unix socket</option><option value="icmp">ICMP</option></select>
+          <select id="tr-routing"><option value="">proxied + direct</option><option value="proxied">proxied only</option><option value="direct">direct only</option></select>
+          <input id="tr-process" type="search" placeholder="app or process">
+          <input id="tr-iface" type="search" placeholder="interface (en0, utun…)">
+          <input id="tr-rule" type="search" placeholder="rule">
+          <input id="tr-node" type="search" placeholder="node">
+          <button id="tr-clear" type="button" class="link">Clear filters</button>
+        </div>
+        <p id="tr-warnings" class="error small" hidden></p>
+        <div id="tr-sankey" class="sankey"></div>
+        <p id="tr-summary" class="muted small"></p>
+      </div>
+      <div class="card" id="tr-anomalies-card" hidden>
+        <h2>Surprises</h2>
+        <ul id="tr-anomalies" class="events"></ul>
+      </div>
+      <div class="card">
+        <h2>Interfaces: hardware layer</h2>
+        <div class="table-wrap">
+          <table id="tr-iface-table">
+            <thead><tr><th>Interface</th><th>Role</th><th>State</th><th>In</th><th>Out</th><th>Errors / drops</th><th>Routes it owns</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <h2 class="spaced">Reconciliation: TUN vs physical NICs <span class="muted small">(last minute)</span></h2>
+        <div id="tr-reconcile"></div>
+      </div>
+      <div class="card">
+        <h2>By app</h2>
+        <div class="table-wrap">
+          <table id="tr-proc-table">
+            <thead><tr><th>App</th><th>Flows</th><th>TCP</th><th>UDP</th><th>Unix</th><th>Up</th><th>Down</th><th>Proxied</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Flows <span class="muted small">(biggest first)</span></h2>
+        <div class="table-wrap">
+          <table id="tr-flow-table">
+            <thead><tr><th>Process</th><th>Protocol</th><th>Path</th><th>Destination</th><th>Bytes</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div id="tr-flow-detail" class="detail"></div>
+        <p><button id="tr-forget" type="button" class="link danger">Delete stored history</button> <span class="muted small">History is kept only on this Mac.</span></p>
       </div>
     </section>
 
@@ -107,10 +225,62 @@
         <h2>Proxies and groups</h2>
         <div class="table-wrap">
           <table id="node-table">
-            <thead><tr><th>Name</th><th>Type</th><th>Selected</th><th>Latency</th></tr></thead>
+            <thead><tr><th>Name</th><th>Type</th><th>Selected</th><th>Latency</th><th>Health</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
+      </div>
+      <div class="card">
+        <h2>Node health</h2>
+        <p class="muted small">Each node is tested every couple of minutes. A failing node is examined stage by stage (DNS, TCP, TLS) to tell blocking from an outage.</p>
+        <div class="toolbar"><button id="health-check" type="button">Check now</button><span id="health-status" class="muted small"></span></div>
+        <div id="health-overview"></div>
+        <div class="table-wrap">
+          <table id="health-table">
+            <thead><tr><th>Node</th><th>State</th><th>Uptime 24h</th><th>Avg latency</th><th>Why</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div id="health-detail"></div>
+      </div>
+      <div class="card">
+        <h2>Failover groups</h2>
+        <div id="groups"></div>
+        <details>
+          <summary>Add or change a group</summary>
+          <form id="group-form" class="pack-form">
+            <input id="group-name" placeholder="group name" required>
+            <select id="group-type"><option>fallback</option><option>url-test</option><option>load-balance</option></select>
+            <input id="group-members" placeholder="members, comma-separated (nodes from your config)" required>
+            <input id="group-tolerance" type="number" min="0" placeholder="tolerance in ms (url-test)">
+            <input id="group-interval" type="number" min="30" placeholder="check interval in seconds (default 300)">
+            <div class="actions"><button type="submit">Preview</button></div>
+          </form>
+          <p id="group-error" class="error" hidden></p>
+          <div id="group-preview" hidden>
+            <pre id="group-diff" class="mono"></pre>
+            <div class="actions"><button id="group-apply" class="primary" type="button">Apply</button></div>
+          </div>
+        </details>
+      </div>
+      <div class="card">
+        <h2>Instances and profiles</h2>
+        <p class="muted small">Each runs side by side with its own ports, directory, TUN device, and mihomo version. Manage them with <code>mihomac profile</code> and <code>mihomac core</code>.</p>
+        <div class="table-wrap">
+          <table id="instance-table">
+            <thead><tr><th>Name</th><th>Status</th><th>Mode</th><th>Core</th><th>Proxy port</th><th>TUN</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Logs</h2>
+        <div class="toolbar">
+          <select id="log-instance"></select>
+          <select id="log-source"><option value="daemon">daemon</option><option value="core">mihomo core</option></select>
+          <button id="log-refresh" type="button">Refresh</button>
+        </div>
+        <pre id="log-output" class="mono log"></pre>
       </div>
       <div class="card">
         <h2>Is the proxy the problem?</h2>

@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -126,6 +128,33 @@ func (c controller) proxies(ctx context.Context) (map[string]ctrlProxy, error) {
 	}
 	err := c.do(ctx, http.MethodGet, "/proxies", nil, &body)
 	return body.Proxies, err
+}
+
+// delay runs mihomo's own delay test through one proxy.
+func (c controller) delay(ctx context.Context, proxy, url string, timeout time.Duration) (time.Duration, error) {
+	q := neturl.Values{"url": {url}, "timeout": {strconv.Itoa(int(timeout / time.Millisecond))}}
+	var body struct {
+		Delay int `json:"delay"`
+	}
+	// The controller's own client times out at 5s; give the test its full timeout.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+c.addr+"/proxies/"+neturl.PathEscape(proxy)+"/delay?"+q.Encode(), nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.secret)
+	resp, err := (&http.Client{Timeout: timeout + 3*time.Second}).Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return 0, fmt.Errorf("delay test: %s: %s", resp.Status, strings.TrimSpace(string(msg)))
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return 0, err
+	}
+	return time.Duration(body.Delay) * time.Millisecond, nil
 }
 
 // reload makes mihomo re-read its config file.

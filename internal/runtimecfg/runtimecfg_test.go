@@ -186,3 +186,64 @@ func TestEmptyAndInvalidConfig(t *testing.T) {
 		t.Error("expected unknown mode error")
 	}
 }
+
+func TestFailoverGroupsMergedAndTargetable(t *testing.T) {
+	set := rules.Set{
+		Groups: []rules.Group{{Name: "Auto", Type: rules.GroupFallback, Members: []string{"hk", "jp"}}},
+		Rules:  []rules.Rule{{Type: rules.TypeDomainSuffix, Value: "example.com", Target: "Auto"}},
+	}
+	compiled, err := rules.Compile(set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := opts
+	o.Rules = &compiled
+	cfg, _ := build(t, `
+proxies:
+  - {name: hk, type: ss, server: 192.0.2.1, port: 1, cipher: aes-128-gcm, password: x}
+  - {name: jp, type: ss, server: 192.0.2.2, port: 1, cipher: aes-128-gcm, password: x}
+proxy-groups:
+  - {name: Mine, type: select, proxies: [hk]}
+rules:
+  - MATCH,Mine
+`, o)
+	groups, _ := cfg["proxy-groups"].([]any)
+	if len(groups) != 2 {
+		t.Fatalf("proxy-groups = %v", groups)
+	}
+	if g := groups[1].(map[string]any); g["name"] != "Auto" || g["type"] != "fallback" {
+		t.Errorf("group = %v", g)
+	}
+
+	for name, user := range map[string]string{
+		"missing member": "proxies:\n  - {name: hk, type: ss, server: 192.0.2.1, port: 1}\nrules: []\n",
+		"name clash":     "proxies:\n  - {name: hk, type: ss, server: x, port: 1}\n  - {name: jp, type: ss, server: x, port: 1}\n  - {name: Auto, type: ss, server: x, port: 1}\n",
+	} {
+		if _, err := Build([]byte(user), o); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestImportedNodesJoinTheConfig(t *testing.T) {
+	o := opts
+	o.ExtraProxies = []map[string]any{
+		{"name": "tokyo", "type": "vless", "server": "203.0.113.5", "port": 443},
+		{"name": "hk", "type": "ss", "server": "198.51.100.1", "port": 1}, // clashes with the user's node
+	}
+	set := rules.Set{Groups: []rules.Group{{Name: "Auto", Type: rules.GroupFallback, Members: []string{"hk", "tokyo"}}}}
+	compiled, _ := rules.Compile(set)
+	o.Rules = &compiled
+	cfg, res := build(t, "proxies:\n  - {name: hk, type: ss, server: 192.0.2.1, port: 1, cipher: aes-128-gcm, password: x}\nrules: []\n", o)
+	proxies, _ := cfg["proxies"].([]any)
+	if len(proxies) != 2 || proxies[1].(map[string]any)["name"] != "tokyo" {
+		t.Errorf("proxies = %v", proxies)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], `"hk" skipped`) {
+		t.Errorf("warnings = %v", res.Warnings)
+	}
+	// Groups and rules can use an imported node.
+	if groups, _ := cfg["proxy-groups"].([]any); len(groups) != 1 {
+		t.Errorf("groups = %v", groups)
+	}
+}
