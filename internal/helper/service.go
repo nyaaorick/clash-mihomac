@@ -388,7 +388,7 @@ func (s *Service) restoreAll(ctx context.Context, _ Peer, _ json.RawMessage) (an
 		}
 	}
 	s.killLeftoverCores()
-	for _, name := range instance.Names() {
+	for _, name := range instance.Slots() {
 		inst, _ := instance.Get("", name)
 		s.removeLeftoverRoutes(ctx, inst.TUNDevice, inst.TUNGateway())
 	}
@@ -581,7 +581,7 @@ func (s *Service) Recover(ctx context.Context) {
 	defer s.mu.Unlock()
 	s.init()
 	s.killLeftoverCores()
-	for _, name := range instance.Names() {
+	for _, name := range instance.Slots() {
 		inst, _ := instance.Get("", name)
 		if n := s.removeLeftoverRoutes(ctx, inst.TUNDevice, inst.TUNGateway()); n > 0 {
 			s.event(name, fmt.Sprintf("startup: removed %d leftover routes via %s", n, inst.TUNGateway()), nil)

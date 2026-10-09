@@ -45,9 +45,10 @@ Diagnostics:
   interfaces        Network interfaces and the routes they own
 
 Other:
-  mcp               Run the MCP server on stdio (for AI assistants)
-  core install      Download and verify a mihomo core
-  core list         List installed mihomo cores
+  mcp               Run the MCP server on stdio (mcp --setup prints client setup)
+  profile           Add, list, or remove side-by-side profiles (profile -h)
+  core              Manage mihomo versions: install, list, use, rollback, remove
+  logs              Show an instance's daemon or core log
   helper <cmd>      Talk to the privileged helper: ping, status, snapshot
   version           Print the Clash Mihomac version
 
@@ -65,7 +66,7 @@ func main() {
 		"restore-network": cmdRestoreNetwork,
 		"rules":           cmdRules, "proposals": cmdProposals,
 		"connections": cmdConnections, "diagnose": cmdDiagnose, "probe": cmdProbe, "interfaces": cmdInterfaces,
-		"mcp": cmdMCP, "core": cmdCore, "helper": cmdHelper,
+		"mcp": cmdMCP, "core": cmdCore, "helper": cmdHelper, "profile": cmdProfile, "logs": cmdLogs,
 		"run":       cmdRun,      // internal: the daemon process started by `start`
 		"core-exec": cmdCoreExec, // internal: wrapper that ties mihomo to the daemon
 	}
@@ -112,7 +113,7 @@ func cmdStart(args []string) error {
 	fs := flag.NewFlagSet("start", flag.ExitOnError)
 	name := instanceFlag(fs)
 	config := fs.String("config", "", "mihomo config file (default <instance dir>/config.yaml)")
-	coreVersion := fs.String("core", core.DefaultVersion, "mihomo core version")
+	coreVersion := fs.String("core", "", "mihomo core version (default: the instance's selected version, see `mihomac core use`)")
 	mode := fs.String("mode", "", "tun, system-proxy, or port-only (default: tun for stable, port-only for debug)")
 	routeAddr := fs.String("route-address", "", "comma-separated CIDRs: only capture these in TUN mode (for testing)")
 	socket := helperSocketFlag(fs)
@@ -121,6 +122,9 @@ func cmdStart(args []string) error {
 	home, inst, err := resolve(*name)
 	if err != nil {
 		return err
+	}
+	if *coreVersion == "" {
+		*coreVersion = core.Selected(inst.Dir, core.DefaultVersion)
 	}
 	if *mode == "" {
 		*mode = runtimecfg.ModePortOnly
@@ -326,17 +330,17 @@ func cmdRestoreNetwork(args []string) error {
 	if err != nil {
 		return err
 	}
-	for _, name := range instance.Names() {
-		inst, err := instance.Get(home, name)
-		if err != nil {
-			return err
-		}
+	insts, err := instance.List(home)
+	if err != nil {
+		return err
+	}
+	for _, inst := range insts {
 		stopped, err := daemon.Stop(inst, 40*time.Second)
 		if err != nil {
-			return fmt.Errorf("stop %s: %w", name, err)
+			return fmt.Errorf("stop %s: %w", inst.Name, err)
 		}
 		if stopped {
-			fmt.Printf("Stopped %s.\n", name)
+			fmt.Printf("Stopped %s.\n", inst.Name)
 		}
 	}
 
@@ -363,48 +367,6 @@ func cmdRestoreNetwork(args []string) error {
 			fmt.Println("  still different: " + r)
 		}
 		return errors.New("network not fully restored; see above")
-	}
-	return nil
-}
-
-func cmdCore(args []string) error {
-	if len(args) == 0 {
-		return errors.New("usage: mihomac core <install|list>")
-	}
-	home, err := instance.Home()
-	if err != nil {
-		return err
-	}
-	mgr := core.NewManager(home)
-
-	switch args[0] {
-	case "install":
-		fs := flag.NewFlagSet("core install", flag.ExitOnError)
-		version := fs.String("version", core.DefaultVersion, "mihomo version (vX.Y.Z)")
-		sum := fs.String("sha256", "", "SHA-256 of the release asset (required for versions without a pinned checksum)")
-		fs.Parse(args[1:])
-		path, err := mgr.Install(context.Background(), *version, runtime.GOARCH, *sum)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("Installed mihomo %s at %s\n", *version, path)
-	case "list":
-		versions, err := mgr.Installed()
-		if err != nil {
-			return err
-		}
-		if len(versions) == 0 {
-			fmt.Println("No cores installed. Run `mihomac core install`.")
-		}
-		for _, v := range versions {
-			mark := ""
-			if v == core.DefaultVersion {
-				mark = " (default)"
-			}
-			fmt.Println(v + mark)
-		}
-	default:
-		return fmt.Errorf("unknown core command %q", args[0])
 	}
 	return nil
 }

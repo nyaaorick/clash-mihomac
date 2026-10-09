@@ -438,10 +438,19 @@ func cmdInterfaces(args []string) error {
 func cmdMCP(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
 	name := instanceFlag(fs)
+	setup := fs.Bool("setup", false, "print setup instructions for Claude, Cursor, and other MCP clients, then exit")
 	fs.Parse(args)
 	_, inst, err := resolve(*name)
 	if err != nil {
 		return err
+	}
+	if *setup {
+		exe, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		fmt.Print(mcp.SetupInstructions(exe, inst.Name))
+		return nil
 	}
 	api, err := client.ForInstance(inst, client.TokenAgent)
 	if err != nil {

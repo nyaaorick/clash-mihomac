@@ -36,6 +36,8 @@ func (d *Daemon) api() http.Handler {
 	mux.HandleFunc("GET /api/interfaces", d.handleInterfaces)
 	mux.HandleFunc("GET /api/nodes", d.handleNodes)
 	mux.HandleFunc("GET /api/apps", d.handleApps)
+	mux.HandleFunc("GET /api/instances", d.handleInstances)
+	mux.HandleFunc("GET /api/logs", d.handleLogs)
 	return mux
 }
 
