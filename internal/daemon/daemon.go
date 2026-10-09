@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/nyaaorick/clash-mihomac/internal/gui"
+	"github.com/nyaaorick/clash-mihomac/internal/health"
 	"github.com/nyaaorick/clash-mihomac/internal/helper"
 	"github.com/nyaaorick/clash-mihomac/internal/instance"
 	"github.com/nyaaorick/clash-mihomac/internal/netstate"
@@ -53,6 +54,7 @@ type Daemon struct {
 	ctrl      controller
 	tracker   *Tracker
 	proposals *Proposals
+	health    *health.History
 	startedAt time.Time
 	coreDied  chan error
 
@@ -99,6 +101,7 @@ func Run(ctx context.Context, o Options) error {
 		ctrl:      controller{addr: fmt.Sprintf("127.0.0.1:%d", inst.ControllerPort), secret: secret},
 		tracker:   NewTracker(),
 		proposals: LoadProposals(inst.Path("proposals.json")),
+		health:    health.LoadHistory(inst.Path("health.json")),
 		coreDied:  make(chan error, 1),
 	}
 
@@ -147,6 +150,7 @@ func Run(ctx context.Context, o Options) error {
 
 	go d.pollConnections(ctx)
 	go d.followLogs(ctx)
+	go d.monitorHealth(ctx)
 
 	health := time.NewTicker(2 * time.Second)
 	defer health.Stop()

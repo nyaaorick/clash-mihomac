@@ -130,3 +130,10 @@ tr.closed td { color: var(--muted); }
 .pack-form textarea { width: 100%; }
 #pack-preview pre { background: var(--code-bg); padding: 10px; border-radius: 6px; overflow: auto; max-height: 360px; white-space: pre-wrap; }
 details summary { cursor: pointer; margin-top: 10px; }
+
+.state { padding: 1px 8px; border-radius: 999px; font-size: 12px; background: var(--code-bg); }
+.state.healthy { color: var(--ok); }
+.state.degraded { color: #b7791f; }
+.state.down, .state.blocked { color: var(--bad); }
+.spaced { margin-top: 12px; }
+#health-table tbody tr { cursor: pointer; }

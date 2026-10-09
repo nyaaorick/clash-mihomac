@@ -17,6 +17,9 @@ type Change struct {
 	// RemovePacks uninstalls them, disabling them first.
 	InstallPacks []Pack   `json:"install_packs,omitempty"`
 	RemovePacks  []string `json:"remove_packs,omitempty"`
+	// SetGroups adds or replaces failover groups by name; RemoveGroups deletes them.
+	SetGroups    []Group  `json:"set_groups,omitempty"`
+	RemoveGroups []string `json:"remove_groups,omitempty"`
 }
 
 // Apply returns s with c applied. s is not modified. It fails if a removed
@@ -27,6 +30,21 @@ func (s Set) Apply(c Change) (Set, error) {
 		Rules:       slices.Clone(s.Rules),
 		InternalDNS: slices.Clone(s.InternalDNS),
 		Library:     slices.Clone(s.Library),
+		Groups:      slices.Clone(s.Groups),
+	}
+	for _, name := range c.RemoveGroups {
+		i := slices.IndexFunc(out.Groups, func(g Group) bool { return g.Name == name })
+		if i < 0 {
+			return Set{}, fmt.Errorf("no group %q to remove", name)
+		}
+		out.Groups = slices.Delete(out.Groups, i, i+1)
+	}
+	for _, g := range c.SetGroups {
+		if i := slices.IndexFunc(out.Groups, func(x Group) bool { return x.Name == g.Name }); i >= 0 {
+			out.Groups[i] = g
+		} else {
+			out.Groups = append(out.Groups, g)
+		}
 	}
 	for _, name := range c.RemovePacks {
 		i := slices.IndexFunc(out.Library, func(p Pack) bool { return p.Name == name })
@@ -70,6 +88,16 @@ func (s Set) Diff(c Change) (string, error) {
 		return "", err
 	}
 	var b strings.Builder
+	for _, name := range c.RemoveGroups {
+		fmt.Fprintf(&b, "- remove group %s\n", name)
+	}
+	for _, g := range c.SetGroups {
+		verb := "+ add"
+		if slices.ContainsFunc(s.Groups, func(x Group) bool { return x.Name == g.Name }) {
+			verb = "~ change"
+		}
+		fmt.Fprintf(&b, "%s group %s\n", verb, g.Describe())
+	}
 	for _, name := range c.RemovePacks {
 		fmt.Fprintf(&b, "- remove pack %s\n", name)
 	}

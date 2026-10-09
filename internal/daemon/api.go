@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nyaaorick/clash-mihomac/internal/gui"
+	"github.com/nyaaorick/clash-mihomac/internal/health"
 	"github.com/nyaaorick/clash-mihomac/internal/helper"
 	"github.com/nyaaorick/clash-mihomac/internal/netstate"
 	"github.com/nyaaorick/clash-mihomac/internal/rules"
@@ -38,6 +39,9 @@ func (d *Daemon) api() http.Handler {
 	mux.HandleFunc("GET /api/interfaces", d.handleInterfaces)
 	mux.HandleFunc("GET /api/nodes", d.handleNodes)
 	mux.HandleFunc("GET /api/apps", d.handleApps)
+	mux.HandleFunc("GET /api/health", d.handleHealth)
+	mux.HandleFunc("GET /api/health/{node}", d.handleNodeHealth)
+	mux.HandleFunc("POST /api/health/check", d.handleHealthCheck)
 	mux.HandleFunc("GET /api/instances", d.handleInstances)
 	mux.HandleFunc("GET /api/logs", d.handleLogs)
 	return mux
@@ -288,6 +292,7 @@ type Node struct {
 	Members []string `json:"members,omitempty"`
 	Alive   bool     `json:"alive"`
 	DelayMs int      `json:"delay_ms,omitempty"`
+	Health  string   `json:"health,omitempty"` // from the health monitor, if it has checked this node
 }
 
 func (d *Daemon) handleNodes(w http.ResponseWriter, r *http.Request) {
@@ -301,6 +306,9 @@ func (d *Daemon) handleNodes(w http.ResponseWriter, r *http.Request) {
 		n := Node{Name: p.Name, Type: p.Type, Now: p.Now, Members: p.All, Alive: p.Alive}
 		if len(p.History) > 0 {
 			n.DelayMs = p.History[len(p.History)-1].Delay
+		}
+		if sum := d.health.Summary(p.Name); sum.State != health.StateUnknown {
+			n.Health = string(sum.State)
 		}
 		out = append(out, n)
 	}

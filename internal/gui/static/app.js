@@ -348,9 +348,73 @@ async function loadNetwork() {
     const nodes = await api("/api/nodes");
     $("#node-table tbody").replaceChildren(...nodes.map((n) => el("tr", {},
       el("td", {}, n.name), el("td", {}, n.type), el("td", {}, n.now || ""),
-      el("td", {}, n.delay_ms ? `${n.delay_ms} ms` : "–"))));
+      el("td", {}, n.delay_ms ? `${n.delay_ms} ms` : "–"),
+      el("td", {}, n.health ? el("span", { class: "state " + n.health }, n.health) : "–"))));
   } catch { /* ignore */ }
+  loadHealth();
+  loadGroups();
 }
+
+async function loadHealth() {
+  let v;
+  try { v = await api("/api/health"); } catch { return; }
+  $("#health-overview").replaceChildren(...(v.overview || []).map((t) => el("p", { class: "verdict" }, t)));
+  $("#health-table tbody").replaceChildren(...v.nodes.map((s) => el("tr", { onclick: () => showNodeHealth(s.node) },
+    el("td", {}, s.node), el("td", {}, el("span", { class: "state " + s.state }, s.state)),
+    el("td", {}, s.uptime_24h < 0 ? "–" : Math.round(s.uptime_24h * 100) + "%"),
+    el("td", {}, s.avg_delay_ms ? s.avg_delay_ms + " ms" : "–"), el("td", { class: "wrap" }, s.reason || ""))));
+  if (!v.nodes.length) $("#health-table tbody").append(el("tr", {}, el("td", { colspan: 5, class: "muted" }, "No checks yet; the first round runs shortly after start.")));
+}
+
+async function showNodeHealth(node) {
+  const box = $("#health-detail");
+  try {
+    const nh = await api("/api/health/" + encodeURIComponent(node));
+    box.replaceChildren(el("h2", { class: "spaced" }, `${node}: recent checks`),
+      el("ul", { class: "events" }, nh.checks.slice(0, 30).map((c) => el("li", {}, el("time", {}, new Date(c.time).toLocaleString()),
+        c.ok ? `ok, ${c.delay_ms} ms` : `FAILED (${c.kind}, ${c.stage}): ${c.detail}`))));
+  } catch (e) { box.replaceChildren(el("p", { class: "error" }, e.message)); }
+}
+
+$("#health-check").addEventListener("click", async () => {
+  const st = $("#health-status");
+  st.textContent = "Checking…";
+  try { await api("/api/health/check", {}); st.textContent = ""; } catch (e) { st.textContent = e.message; }
+  loadHealth();
+});
+
+async function loadGroups() {
+  let v;
+  try { v = await api("/api/rules"); } catch { return; }
+  const groups = v.set.groups || [];
+  $("#groups").replaceChildren(...(groups.length ? groups.map((g) => el("div", { class: "pack" },
+    el("strong", {}, g.name), el("span", { class: "muted" }, `${g.type} · ${g.members.join(", ")}`),
+    el("button", { class: "link danger", onclick: () => confirm(`Remove group ${g.name}?`) && applyGroupChange({ remove_groups: [g.name] }) }, "remove")))
+    : [el("p", { class: "muted" }, "No failover groups yet. A group switches between nodes automatically; use its name as a rule target.")]));
+}
+
+async function applyGroupChange(change) {
+  try { await api("/api/rules/change", change); loadGroups(); return true; } catch (e) { alert(e.message); return false; }
+}
+
+let groupChange = null;
+$("#group-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  showError($("#group-error"), null);
+  $("#group-preview").hidden = true;
+  const g = { name: $("#group-name").value.trim(), type: $("#group-type").value,
+    members: $("#group-members").value.split(",").map((m) => m.trim()).filter(Boolean) };
+  if ($("#group-tolerance").value) g.tolerance = Number($("#group-tolerance").value);
+  if ($("#group-interval").value) g.interval = Number($("#group-interval").value);
+  groupChange = { set_groups: [g] };
+  try {
+    $("#group-diff").textContent = (await api("/api/rules/preview", groupChange)).diff;
+    $("#group-preview").hidden = false;
+  } catch (err) { showError($("#group-error"), err); }
+});
+$("#group-apply").addEventListener("click", async () => {
+  if (groupChange && await applyGroupChange(groupChange)) { groupChange = null; $("#group-preview").hidden = true; $("#group-form").reset(); }
+});
 
 async function loadInstances() {
   let list;

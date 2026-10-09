@@ -68,6 +68,8 @@ type Set struct {
 	// Library holds installed community packs. Packs lists which packs,
 	// built in or installed, are enabled.
 	Library []Pack `yaml:"library,omitempty" json:"library,omitempty"`
+	// Groups are failover groups that rules can target by name.
+	Groups []Group `yaml:"groups,omitempty" json:"groups,omitempty"`
 }
 
 // Load reads a rule set. A missing file is an empty set.
@@ -113,6 +115,9 @@ var (
 // Validate checks that every rule can be compiled safely.
 func (s Set) Validate() error {
 	if err := validateLibrary(s.Library); err != nil {
+		return err
+	}
+	if err := validateGroups(s.Groups); err != nil {
 		return err
 	}
 	for _, p := range s.Packs {
@@ -198,6 +203,7 @@ type Compiled struct {
 	Rules            []string         // mihomo rule lines, excluding config rules
 	Sources          []Source         // provenance for each entry in Rules
 	Proxies          []map[string]any // interface-bound DIRECT outbounds
+	Groups           []map[string]any // failover groups (mihomo proxy-groups)
 	NameserverPolicy map[string]any
 }
 
@@ -259,6 +265,10 @@ func Compile(s Set) (Compiled, error) {
 		for _, dom := range d.Domains {
 			c.NameserverPolicy["+."+strings.TrimPrefix(dom, "+.")] = servers
 		}
+	}
+
+	for _, g := range s.Groups {
+		c.Groups = append(c.Groups, g.config())
 	}
 
 	names := make([]string, 0, len(ifaces))

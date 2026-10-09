@@ -36,6 +36,7 @@ Running:
 
 Routing:
   rules             List rules; add, remove, or toggle packs (rules -h)
+  groups            Failover groups: fallback, url-test, load-balance (groups -h)
   packs             Install, update, and remove community rule packs (packs -h)
   proposals         List, apply, or reject proposed rule changes
 
@@ -44,6 +45,7 @@ Diagnostics:
   diagnose <id>     Explain where one connection went and why
   probe <url>       Compare a direct fetch with a proxied one
   interfaces        Network interfaces and the routes they own
+  health            Node health, blocking detection, and history (health -h)
 
 Other:
   mcp               Run the MCP server on stdio (mcp --setup prints client setup)
@@ -67,7 +69,7 @@ func main() {
 		"restore-network": cmdRestoreNetwork,
 		"rules":           cmdRules, "proposals": cmdProposals,
 		"connections": cmdConnections, "diagnose": cmdDiagnose, "probe": cmdProbe, "interfaces": cmdInterfaces,
-		"mcp": cmdMCP, "core": cmdCore, "helper": cmdHelper, "profile": cmdProfile, "packs": cmdPacks, "logs": cmdLogs,
+		"mcp": cmdMCP, "core": cmdCore, "helper": cmdHelper, "profile": cmdProfile, "packs": cmdPacks, "health": cmdHealth, "groups": cmdGroups, "logs": cmdLogs,
 		"run":       cmdRun,      // internal: the daemon process started by `start`
 		"core-exec": cmdCoreExec, // internal: wrapper that ties mihomo to the daemon
 	}

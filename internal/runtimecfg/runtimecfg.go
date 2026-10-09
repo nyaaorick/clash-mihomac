@@ -184,6 +184,14 @@ func Build(user []byte, o Options) (Result, error) {
 		}
 		cfg["proxies"] = proxies
 
+		if len(o.Rules.Groups) > 0 {
+			groups, _ := cfg["proxy-groups"].([]any)
+			for _, g := range o.Rules.Groups {
+				groups = append(groups, g)
+			}
+			cfg["proxy-groups"] = groups
+		}
+
 		if len(o.Rules.NameserverPolicy) > 0 {
 			if dns == nil {
 				dns = map[string]any{"enable": true, "nameserver": []any{"system"}}
@@ -230,6 +238,22 @@ func checkTargets(cfg map[string]any, c *rules.Compiled) error {
 	}
 	for _, p := range c.Proxies {
 		known[p["name"].(string)] = true
+	}
+	for _, g := range c.Groups {
+		name := g["name"].(string)
+		if known[name] {
+			return fmt.Errorf("group %q has the same name as a proxy or group in your config", name)
+		}
+	}
+	for _, g := range c.Groups {
+		for _, m := range g["proxies"].([]any) {
+			if !known[m.(string)] {
+				return fmt.Errorf("group %q contains %q, which is not a proxy or group in your config", g["name"], m)
+			}
+		}
+	}
+	for _, g := range c.Groups {
+		known[g["name"].(string)] = true
 	}
 	for _, line := range c.Rules {
 		parts := strings.Split(line, ",")

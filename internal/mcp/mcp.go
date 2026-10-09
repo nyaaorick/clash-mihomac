@@ -167,6 +167,8 @@ var tools = []tool{
 		schema(map[string]any{"id": map[string]any{"type": "string"}}, "id"), readOnly},
 	{"list_rules", "The final rule list in match order, each with its source (user rule, built-in bypass, rule pack, or config file), plus the user's rule set and available packs.", schema(map[string]any{}), readOnly},
 	{"list_nodes", "Proxies and proxy groups, with each group's current selection and latest latency.", schema(map[string]any{}), readOnly},
+	{"node_health", "Health of each proxy node from the background monitor: healthy, degraded, down, or blocked, with uptime, average latency, and the reason. A blocked node is failing with DNS poisoning, TCP resets, or TLS handshake failures. Pass a node name for its recent checks.",
+		schema(map[string]any{"node": map[string]any{"type": "string"}}), readOnly},
 	{"list_interfaces", "Network interfaces with addresses, route counts, and roles (default route, VPN, this instance's TUN).", schema(map[string]any{}), readOnly},
 	{"probe_url", "Fetch a URL directly (bypassing every TUN) and through the proxy at the same time, and say whether the proxy is the cause of a failure.",
 		schema(map[string]any{"url": map[string]any{"type": "string", "description": "http:// or https:// URL"}}, "url"), readOnly},
@@ -220,6 +222,12 @@ func (s *Server) call(ctx context.Context, name string, raw json.RawMessage) (st
 		err = s.API.Get(ctx, "/api/rules", &out)
 	case "list_nodes":
 		err = s.API.Get(ctx, "/api/nodes", &out)
+	case "node_health":
+		path := "/api/health"
+		if n := str("node"); n != "" {
+			path += "/" + url.PathEscape(n)
+		}
+		err = s.API.Get(ctx, path, &out)
 	case "list_interfaces":
 		err = s.API.Get(ctx, "/api/interfaces", &out)
 	case "probe_url":

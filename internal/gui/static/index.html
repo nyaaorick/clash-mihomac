@@ -122,10 +122,43 @@
         <h2>Proxies and groups</h2>
         <div class="table-wrap">
           <table id="node-table">
-            <thead><tr><th>Name</th><th>Type</th><th>Selected</th><th>Latency</th></tr></thead>
+            <thead><tr><th>Name</th><th>Type</th><th>Selected</th><th>Latency</th><th>Health</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
+      </div>
+      <div class="card">
+        <h2>Node health</h2>
+        <p class="muted small">Each node is tested every couple of minutes. A failing node is examined stage by stage (DNS, TCP, TLS) to tell blocking from an outage.</p>
+        <div class="toolbar"><button id="health-check" type="button">Check now</button><span id="health-status" class="muted small"></span></div>
+        <div id="health-overview"></div>
+        <div class="table-wrap">
+          <table id="health-table">
+            <thead><tr><th>Node</th><th>State</th><th>Uptime 24h</th><th>Avg latency</th><th>Why</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div id="health-detail"></div>
+      </div>
+      <div class="card">
+        <h2>Failover groups</h2>
+        <div id="groups"></div>
+        <details>
+          <summary>Add or change a group</summary>
+          <form id="group-form" class="pack-form">
+            <input id="group-name" placeholder="group name" required>
+            <select id="group-type"><option>fallback</option><option>url-test</option><option>load-balance</option></select>
+            <input id="group-members" placeholder="members, comma-separated (nodes from your config)" required>
+            <input id="group-tolerance" type="number" min="0" placeholder="tolerance in ms (url-test)">
+            <input id="group-interval" type="number" min="30" placeholder="check interval in seconds (default 300)">
+            <div class="actions"><button type="submit">Preview</button></div>
+          </form>
+          <p id="group-error" class="error" hidden></p>
+          <div id="group-preview" hidden>
+            <pre id="group-diff" class="mono"></pre>
+            <div class="actions"><button id="group-apply" class="primary" type="button">Apply</button></div>
+          </div>
+        </details>
       </div>
       <div class="card">
         <h2>Instances and profiles</h2>
