@@ -45,6 +45,7 @@ Diagnostics:
   diagnose <id>     Explain where one connection went and why
   probe <url>       Compare a direct fetch with a proxied one
   interfaces        Network interfaces and the routes they own
+  vps               Set up and manage proxy servers over SSH (vps -h)
   traffic           Physical traffic view: apps, NICs, surprises (traffic -h)
   health            Node health, blocking detection, and history (health -h)
 
@@ -70,7 +71,7 @@ func main() {
 		"restore-network": cmdRestoreNetwork,
 		"rules":           cmdRules, "proposals": cmdProposals,
 		"connections": cmdConnections, "diagnose": cmdDiagnose, "probe": cmdProbe, "interfaces": cmdInterfaces,
-		"mcp": cmdMCP, "core": cmdCore, "helper": cmdHelper, "profile": cmdProfile, "packs": cmdPacks, "health": cmdHealth, "traffic": cmdTraffic, "groups": cmdGroups, "logs": cmdLogs,
+		"mcp": cmdMCP, "core": cmdCore, "helper": cmdHelper, "profile": cmdProfile, "packs": cmdPacks, "health": cmdHealth, "vps": cmdVPS, "traffic": cmdTraffic, "groups": cmdGroups, "logs": cmdLogs,
 		"run":       cmdRun,      // internal: the daemon process started by `start`
 		"core-exec": cmdCoreExec, // internal: wrapper that ties mihomo to the daemon
 	}
