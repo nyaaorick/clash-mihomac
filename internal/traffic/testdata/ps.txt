@@ -1,0 +1,4 @@
+    1     0 /sbin/launchd
+  501     1 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+  777   501 /usr/local/bin/node
+  312     1 /usr/sbin/mDNSResponder

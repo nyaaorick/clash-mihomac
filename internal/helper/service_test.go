@@ -3,10 +3,12 @@ package helper
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -228,5 +230,51 @@ func TestTUNStartRejects(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(s.Root, "run", "debug", "mihomo")); err == nil {
 		t.Error("unverified core left in place")
+	}
+}
+
+type lsofRunner struct{ out string }
+
+func (r lsofRunner) Run(_ context.Context, name string, args ...string) (string, error) {
+	if name != "/usr/sbin/lsof" || strings.Join(args, " ") != strings.Join(lsofArgs, " ") {
+		return "", errors.New("unexpected command " + name + " " + strings.Join(args, " "))
+	}
+	return r.out, nil
+}
+
+func TestSocketsCommandFiltersOtherUsers(t *testing.T) {
+	me, err := user.Current()
+	if err != nil {
+		t.Skip(err)
+	}
+	out := "p1\ncd\nLroot\nf1\ntIPv4\nPUDP\nn*:53\n" +
+		"p2\ncmine\nL" + me.Username + "\nf1\ntIPv4\nPTCP\nn1.1.1.1:1->2.2.2.2:443\nTST=ESTABLISHED\n" +
+		"p3\ncsvc\nL_mdnsresponder\nf1\ntIPv4\nPUDP\nn*:5353\n" +
+		"p4\ncsecret\nLsomeone-else\nf1\ntIPv4\nPTCP\nn9.9.9.9:1->8.8.8.8:443\nTST=ESTABLISHED\n"
+	s, _, _ := newTestService(t)
+	s.Runner = lsofRunner{out}
+	s.UID = os.Getuid()
+
+	res, err := s.sockets(context.Background(), Peer{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := res.(SocketsResult)
+	var cmds []string
+	for _, sk := range got.Sockets {
+		cmds = append(cmds, sk.Command)
+	}
+	if strings.Join(cmds, ",") != "d,mine,svc" {
+		t.Errorf("sockets = %v; another user's sockets must be left out", cmds)
+	}
+	if _, err := s.sockets(context.Background(), Peer{}, json.RawMessage(`{"args":["--evil"]}`)); err == nil {
+		t.Error("sockets accepted arguments")
+	}
+}
+
+func TestSocketsIsInTheAllowlist(t *testing.T) {
+	s, _, _ := newTestService(t)
+	if _, ok := s.Commands()["sockets"]; !ok {
+		t.Error("sockets command missing")
 	}
 }

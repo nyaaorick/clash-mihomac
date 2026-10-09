@@ -132,6 +132,7 @@ func (s *Service) Commands() map[string]Command {
 			return netstate.Take(ctx, s.Runner)
 		},
 		"status":          s.status,
+		"sockets":         s.sockets,
 		"tun-start":       s.tunStart,
 		"tun-reload":      s.tunReload,
 		"tun-stop":        s.stopCmd(KindTUN),
