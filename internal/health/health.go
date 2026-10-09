@@ -278,8 +278,13 @@ func TargetsFromConfig(cfg []byte) ([]Target, error) {
 	if err := yaml.Unmarshal(cfg, &doc); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	return TargetsFromProxies(doc.Proxies), nil
+}
+
+// TargetsFromProxies converts mihomo proxy entries into check targets.
+func TargetsFromProxies(proxies []map[string]any) []Target {
 	var out []Target
-	for _, p := range doc.Proxies {
+	for _, p := range proxies {
 		name, _ := p["name"].(string)
 		if name == "" {
 			continue
@@ -310,5 +315,5 @@ func TargetsFromConfig(cfg []byte) ([]Target, error) {
 		}
 		out = append(out, t)
 	}
-	return out, nil
+	return out
 }

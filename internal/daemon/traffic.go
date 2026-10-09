@@ -5,14 +5,12 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"os"
 	"sort"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/nyaaorick/clash-mihomac/internal/gui"
-	"github.com/nyaaorick/clash-mihomac/internal/health"
 	"github.com/nyaaorick/clash-mihomac/internal/helper"
 	"github.com/nyaaorick/clash-mihomac/internal/netstate"
 	"github.com/nyaaorick/clash-mihomac/internal/runtimecfg"
@@ -216,21 +214,19 @@ func (d *Daemon) nodeAddrs(node string) []netip.Addr {
 		return e.addrs
 	}
 	var addrs []netip.Addr
-	if cfg, err := os.ReadFile(d.o.ConfigPath); err == nil {
-		if targets, err := health.TargetsFromConfig(cfg); err == nil {
-			for _, t := range targets {
-				if t.Name != node {
-					continue
+	if targets, err := d.nodeTargets(); err == nil {
+		for _, t := range targets {
+			if t.Name != node {
+				continue
+			}
+			if a, err := netip.ParseAddr(t.Server); err == nil {
+				addrs = []netip.Addr{a}
+			} else {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				if ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", t.Server); err == nil {
+					addrs = ips
 				}
-				if a, err := netip.ParseAddr(t.Server); err == nil {
-					addrs = []netip.Addr{a}
-				} else {
-					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-					if ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", t.Server); err == nil {
-						addrs = ips
-					}
-					cancel()
-				}
+				cancel()
 			}
 		}
 	}

@@ -42,6 +42,9 @@ type Options struct {
 	// Rules are merged ahead of the config's own rules. Nil leaves the
 	// config's rules untouched.
 	Rules *rules.Compiled
+	// ExtraProxies are nodes imported outside the user's config file. A
+	// node whose name the config already uses is skipped with a warning.
+	ExtraProxies []map[string]any
 }
 
 // Result is a built runtime config.
@@ -90,6 +93,28 @@ func Build(user []byte, o Options) (Result, error) {
 
 	var warnings []string
 	warn := func(format string, args ...any) { warnings = append(warnings, fmt.Sprintf(format, args...)) }
+
+	if len(o.ExtraProxies) > 0 {
+		proxies, _ := cfg["proxies"].([]any)
+		used := map[string]bool{}
+		for _, p := range proxies {
+			if m, ok := p.(map[string]any); ok {
+				if n, ok := m["name"].(string); ok {
+					used[n] = true
+				}
+			}
+		}
+		for _, p := range o.ExtraProxies {
+			name, _ := p["name"].(string)
+			if name == "" || used[name] {
+				warn("imported node %q skipped: its name is already used by your config", name)
+				continue
+			}
+			used[name] = true
+			proxies = append(proxies, p)
+		}
+		cfg["proxies"] = proxies
+	}
 
 	for _, k := range listenerKeys {
 		if _, ok := cfg[k]; ok {

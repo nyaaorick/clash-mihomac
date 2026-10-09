@@ -224,3 +224,26 @@ rules:
 		}
 	}
 }
+
+func TestImportedNodesJoinTheConfig(t *testing.T) {
+	o := opts
+	o.ExtraProxies = []map[string]any{
+		{"name": "tokyo", "type": "vless", "server": "203.0.113.5", "port": 443},
+		{"name": "hk", "type": "ss", "server": "198.51.100.1", "port": 1}, // clashes with the user's node
+	}
+	set := rules.Set{Groups: []rules.Group{{Name: "Auto", Type: rules.GroupFallback, Members: []string{"hk", "tokyo"}}}}
+	compiled, _ := rules.Compile(set)
+	o.Rules = &compiled
+	cfg, res := build(t, "proxies:\n  - {name: hk, type: ss, server: 192.0.2.1, port: 1, cipher: aes-128-gcm, password: x}\nrules: []\n", o)
+	proxies, _ := cfg["proxies"].([]any)
+	if len(proxies) != 2 || proxies[1].(map[string]any)["name"] != "tokyo" {
+		t.Errorf("proxies = %v", proxies)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], `"hk" skipped`) {
+		t.Errorf("warnings = %v", res.Warnings)
+	}
+	// Groups and rules can use an imported node.
+	if groups, _ := cfg["proxy-groups"].([]any); len(groups) != 1 {
+		t.Errorf("groups = %v", groups)
+	}
+}

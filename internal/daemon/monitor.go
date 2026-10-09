@@ -11,6 +11,7 @@ import (
 
 	"github.com/nyaaorick/clash-mihomac/internal/health"
 	"github.com/nyaaorick/clash-mihomac/internal/rules"
+	"github.com/nyaaorick/clash-mihomac/internal/vps"
 )
 
 // Health-check timing.
@@ -55,11 +56,7 @@ func (d *Daemon) checkNodes(ctx context.Context, only string) []string {
 	healthRun.Lock()
 	defer healthRun.Unlock()
 
-	cfg, err := os.ReadFile(d.o.ConfigPath)
-	if err != nil {
-		return nil
-	}
-	targets, err := health.TargetsFromConfig(cfg)
+	targets, err := d.nodeTargets()
 	if err != nil {
 		return nil
 	}
@@ -104,6 +101,23 @@ func (d *Daemon) checkNodes(ctx context.Context, only string) []string {
 		names[i] = t.Name
 	}
 	return names
+}
+
+// nodeTargets lists every proxy node to check: those in the user's config
+// and those imported from share links or managed servers.
+func (d *Daemon) nodeTargets() ([]health.Target, error) {
+	cfg, err := os.ReadFile(d.o.ConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	targets, err := health.TargetsFromConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if nodes, err := vps.LoadNodes(d.inst.Path("nodes.yaml")); err == nil {
+		targets = append(targets, health.TargetsFromProxies(vps.Proxies(nodes))...)
+	}
+	return targets, nil
 }
 
 func filterTargets(ts []health.Target, name string) []health.Target {
