@@ -2,6 +2,7 @@ package traffic
 
 import (
 	"net/netip"
+	"sort"
 	"strings"
 )
 
@@ -52,4 +53,27 @@ func (t *RouteTable) lookup(ip netip.Addr, avoid string) (Route, bool) {
 		}
 	}
 	return best, bestBits >= 0
+}
+
+// DestinationsVia lists up to max destinations (CIDRs) routed through the
+// named interface, most specific first. It is safe on a nil table.
+func (t *RouteTable) DestinationsVia(iface string, max int) []string {
+	if t == nil {
+		return nil
+	}
+	var rs []parsedRoute
+	for _, r := range t.routes {
+		if r.Iface == iface {
+			rs = append(rs, r)
+		}
+	}
+	sort.SliceStable(rs, func(i, j int) bool { return rs[i].prefix.Bits() > rs[j].prefix.Bits() })
+	var out []string
+	for _, r := range rs {
+		if len(out) == max {
+			break
+		}
+		out = append(out, r.Dest)
+	}
+	return out
 }

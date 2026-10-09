@@ -42,6 +42,10 @@ func (d *Daemon) api() http.Handler {
 	mux.HandleFunc("GET /api/health", d.handleHealth)
 	mux.HandleFunc("GET /api/health/{node}", d.handleNodeHealth)
 	mux.HandleFunc("POST /api/health/check", d.handleHealthCheck)
+	mux.HandleFunc("GET /api/traffic", d.handleTraffic)
+	mux.HandleFunc("GET /api/traffic/flows", d.handleTrafficFlows)
+	mux.HandleFunc("GET /api/traffic/interfaces", d.handleTrafficInterfaces)
+	mux.HandleFunc("POST /api/traffic/clear", d.handleTrafficClear)
 	mux.HandleFunc("GET /api/instances", d.handleInstances)
 	mux.HandleFunc("GET /api/logs", d.handleLogs)
 	return mux

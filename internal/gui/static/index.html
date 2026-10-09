@@ -15,6 +15,7 @@
       <button data-tab="overview" class="active">Overview</button>
       <button data-tab="connections">Connections</button>
       <button data-tab="rules">Rules <span id="pending-badge" class="badge" hidden></span></button>
+      <button data-tab="traffic">Traffic</button>
       <button data-tab="network">Network</button>
     </nav>
   </header>
@@ -105,6 +106,65 @@
             <tbody></tbody>
           </table>
         </div>
+      </div>
+    </section>
+
+    <section id="tab-traffic" hidden>
+      <div class="card">
+        <h2>Where traffic physically goes</h2>
+        <p class="muted small">Each band is a group of flows; width is bytes. Left to right: the app, its protocol and socket type, the tunnel that captured it, the rule that matched, the node, the physical NIC, and the destination. Click a box to filter by it.</p>
+        <div class="toolbar">
+          <select id="tr-view" title="Which layers to show">
+            <option value="full">Full path</option><option value="hardware">Hardware (tunnels and NICs)</option><option value="software">Software (apps and protocols)</option>
+          </select>
+          <select id="tr-mode"><option value="live">Live</option><option value="history">History</option></select>
+          <select id="tr-range" hidden><option value="5m">last 5 min</option><option value="15m" selected>last 15 min</option><option value="1h">last hour</option><option value="6h">last 6 hours</option><option value="24h">last 24 hours</option></select>
+          <select id="tr-proto"><option value="">any protocol</option><option value="tcp">TCP</option><option value="udp">UDP</option><option value="unix">Unix socket</option><option value="icmp">ICMP</option></select>
+          <select id="tr-routing"><option value="">proxied + direct</option><option value="proxied">proxied only</option><option value="direct">direct only</option></select>
+          <input id="tr-process" type="search" placeholder="app or process">
+          <input id="tr-iface" type="search" placeholder="interface (en0, utun…)">
+          <input id="tr-rule" type="search" placeholder="rule">
+          <input id="tr-node" type="search" placeholder="node">
+          <button id="tr-clear" type="button" class="link">Clear filters</button>
+        </div>
+        <p id="tr-warnings" class="error small" hidden></p>
+        <div id="tr-sankey" class="sankey"></div>
+        <p id="tr-summary" class="muted small"></p>
+      </div>
+      <div class="card" id="tr-anomalies-card" hidden>
+        <h2>Surprises</h2>
+        <ul id="tr-anomalies" class="events"></ul>
+      </div>
+      <div class="card">
+        <h2>Interfaces: hardware layer</h2>
+        <div class="table-wrap">
+          <table id="tr-iface-table">
+            <thead><tr><th>Interface</th><th>Role</th><th>State</th><th>In</th><th>Out</th><th>Errors / drops</th><th>Routes it owns</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <h2 class="spaced">Reconciliation: TUN vs physical NICs <span class="muted small">(last minute)</span></h2>
+        <div id="tr-reconcile"></div>
+      </div>
+      <div class="card">
+        <h2>By app</h2>
+        <div class="table-wrap">
+          <table id="tr-proc-table">
+            <thead><tr><th>App</th><th>Flows</th><th>TCP</th><th>UDP</th><th>Unix</th><th>Up</th><th>Down</th><th>Proxied</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Flows <span class="muted small">(biggest first)</span></h2>
+        <div class="table-wrap">
+          <table id="tr-flow-table">
+            <thead><tr><th>Process</th><th>Protocol</th><th>Path</th><th>Destination</th><th>Bytes</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div id="tr-flow-detail" class="detail"></div>
+        <p><button id="tr-forget" type="button" class="link danger">Delete stored history</button> <span class="muted small">History is kept only on this Mac.</span></p>
       </div>
     </section>
 

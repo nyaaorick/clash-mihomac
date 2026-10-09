@@ -55,6 +55,7 @@ type Daemon struct {
 	tracker   *Tracker
 	proposals *Proposals
 	health    *health.History
+	traffic   *trafficState
 	startedAt time.Time
 	coreDied  chan error
 
@@ -104,6 +105,7 @@ func Run(ctx context.Context, o Options) error {
 		health:    health.LoadHistory(inst.Path("health.json")),
 		coreDied:  make(chan error, 1),
 	}
+	d.initTraffic()
 
 	// Claim the GUI port first so a port clash fails before anything changes.
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", inst.GUIPort))
@@ -151,6 +153,7 @@ func Run(ctx context.Context, o Options) error {
 	go d.pollConnections(ctx)
 	go d.followLogs(ctx)
 	go d.monitorHealth(ctx)
+	go d.pollTraffic(ctx)
 
 	health := time.NewTicker(2 * time.Second)
 	defer health.Stop()

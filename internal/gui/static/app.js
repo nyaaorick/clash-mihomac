@@ -462,6 +462,206 @@ async function runProbe(url, box) {
   }
 }
 
+// ---- traffic ---------------------------------------------------------------
+
+const SVGNS = "http://www.w3.org/2000/svg";
+function svg(tag, attrs = {}, ...children) {
+  const e = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k.startsWith("on")) e.addEventListener(k.slice(2), v); else e.setAttribute(k, v);
+  }
+  for (const c of children.flat()) if (c !== null && c !== undefined) e.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return e;
+}
+
+const fmtRate = (bps) => fmtBytes(Math.round(bps)) + "/s";
+const trInputs = ["#tr-view", "#tr-mode", "#tr-range", "#tr-proto", "#tr-routing", "#tr-process", "#tr-iface", "#tr-rule", "#tr-node"];
+
+function trQuery(extra = {}) {
+  const f = {
+    view: $("#tr-view").value, mode: $("#tr-mode").value, proto: $("#tr-proto").value, routing: $("#tr-routing").value,
+    process: $("#tr-process").value.trim(), iface: $("#tr-iface").value.trim(), rule: $("#tr-rule").value.trim(), node: $("#tr-node").value.trim(),
+    ...extra,
+  };
+  if (f.mode === "history") f.range = $("#tr-range").value;
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(f)) if (v) p.set(k, v);
+  return p.toString();
+}
+
+for (const sel of trInputs) {
+  $(sel).addEventListener(sel.endsWith("view") || sel.includes("mode") || sel.includes("range") || sel.includes("proto") || sel.includes("routing") ? "change" : "input", () => {
+    $("#tr-range").hidden = $("#tr-mode").value !== "history";
+    loadTraffic();
+  });
+}
+$("#tr-clear").addEventListener("click", () => {
+  for (const sel of ["#tr-proto", "#tr-routing", "#tr-process", "#tr-iface", "#tr-rule", "#tr-node"]) $(sel).value = "";
+  loadTraffic();
+});
+$("#tr-forget").addEventListener("click", async () => {
+  if (!confirm("Delete all stored traffic history for this instance?")) return;
+  try { await api("/api/traffic/clear", {}); } catch (e) { alert(e.message); }
+  loadTraffic();
+});
+
+// Clicking a box filters by what it stands for.
+function filterFromNode(n) {
+  if (n.label.startsWith("other (")) return;
+  const set = (sel, v) => { $(sel).value = v; };
+  switch (n.layer) {
+    case "process": set("#tr-process", n.label); break;
+    case "protocol": set("#tr-proto", n.label.startsWith("Unix") ? "unix" : n.label.split(/[ /]/)[0].toLowerCase()); break;
+    case "tunnel": case "nic": if (n.label !== "not captured") set("#tr-iface", n.label); break;
+    case "rule": set("#tr-rule", n.label.includes(" ") ? n.label.split(" ").slice(1).join(" ") : n.label); break;
+    case "node": set("#tr-node", n.label.includes(" → ") ? n.label.split(" → ").pop() : n.label); break;
+    default: return;
+  }
+  loadTraffic();
+}
+
+function drawSankey(box, data) {
+  const layers = data.layers.filter((l) => data.nodes.some((n) => n.layer === l));
+  if (!data.nodes.length) {
+    box.replaceChildren(el("p", { class: "muted" }, "No flows match these filters."));
+    return;
+  }
+  const W = Math.max(box.clientWidth, 900), H = 480, top = 24, nodeW = 14, gap = 8, labelW = 190;
+  const stepX = layers.length > 1 ? (W - labelW - nodeW) / (layers.length - 1) : 0;
+
+  const byId = new Map(data.nodes.map((n) => [n.id, { ...n, in: 0, out: 0, outLinks: [], inLinks: [] }]));
+  for (const l of data.links) {
+    const a = byId.get(l.source), b = byId.get(l.target);
+    if (!a || !b) continue;
+    a.out += l.value; b.in += l.value;
+    const link = { ...l, a, b };
+    a.outLinks.push(link); b.inLinks.push(link);
+  }
+  const cols = layers.map((l) => [...byId.values()].filter((n) => n.layer === l));
+  for (const n of byId.values()) n.value = Math.max(n.in, n.out, 1);
+
+  const ky = Math.min(...cols.map((c) => (H - top - gap * (c.length - 1)) / c.reduce((s, n) => s + n.value, 0)));
+  cols.forEach((col, i) => {
+    let y = top;
+    for (const n of col) {
+      n.x = i * stepX; n.y = y; n.h = Math.max(n.value * ky, 6);
+      y += n.h + gap;
+    }
+  });
+  for (const n of byId.values()) {
+    n.outLinks.sort((p, q) => p.b.y - q.b.y);
+    n.inLinks.sort((p, q) => p.a.y - q.a.y);
+    let oy = n.y, iy = n.y;
+    for (const l of n.outLinks) { l.w = Math.max(l.value * ky, 2); l.y0 = oy + l.w / 2; oy += l.w; }
+    for (const l of n.inLinks) { l.w = Math.max(l.value * ky, 2); l.y1 = iy + l.w / 2; iy += l.w; }
+  }
+
+  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Traffic flow diagram" });
+  layers.forEach((l, i) => root.append(svg("text", { class: "layer-title", x: i * stepX, y: 12 }, l)));
+  for (const n of byId.values()) for (const l of n.outLinks) {
+    const x0 = l.a.x + nodeW, x1 = l.b.x, xm = (x0 + x1) / 2;
+    root.append(svg("path", { class: "link" + (l.a.alert && l.b.alert ? " alert" : ""), d: `M${x0},${l.y0} C${xm},${l.y0} ${xm},${l.y1} ${x1},${l.y1}`, "stroke-width": l.w },
+      svg("title", {}, `${l.a.label} → ${l.b.label}\n${l.flows} flow${l.flows === 1 ? "" : "s"}, ${fmtBytes(l.value)}`)));
+  }
+  for (const n of byId.values()) {
+    root.append(svg("g", { class: "node" + (n.alert ? " alert" : ""), onclick: () => filterFromNode(n) },
+      svg("rect", { x: n.x, y: n.y, width: nodeW, height: n.h }),
+      svg("text", { x: n.x + nodeW + 4, y: n.y + Math.min(n.h / 2, 14) + 4 }, n.label.length > 30 ? n.label.slice(0, 29) + "…" : n.label),
+      svg("title", {}, `${n.label}\n${n.flows} flow${n.flows === 1 ? "" : "s"}, ${fmtBytes(n.bytes)}${n.alert ? "\n⚠ has a surprise on its path" : ""}`)));
+  }
+  box.replaceChildren(root);
+}
+
+const ANOMALY_TITLE = {
+  "bypassed-tun": "Bypassed TUN",
+  "other-vpn": "Through another VPN",
+  "wrong-nic": "Wrong NIC",
+};
+
+async function loadTraffic() {
+  let v;
+  try { v = await api("/api/traffic?" + trQuery()); } catch (e) {
+    $("#tr-sankey").replaceChildren(el("p", { class: "error" }, e.message));
+    return;
+  }
+  drawSankey($("#tr-sankey"), v.sankey);
+  const warn = $("#tr-warnings");
+  warn.hidden = !(v.warnings && v.warnings.length);
+  warn.textContent = (v.warnings || []).join(" · ");
+  $("#tr-summary").textContent = `${v.flows} flow${v.flows === 1 ? "" : "s"}` +
+    (v.mode === "live" ? ", updated " + fmtTime(v.updated) : "") +
+    (v.tun ? ` · TUN ${v.tun}` : " · not in TUN mode: only traffic that reaches the proxy port is attributed to rules");
+
+  $("#tr-anomalies-card").hidden = !v.anomalies.length;
+  $("#tr-anomalies").replaceChildren(...v.anomalies.map((a) => el("li", {}, el("strong", {}, ANOMALY_TITLE[a.kind] || a.kind), `: ${a.process} → ${a.remote}. ${a.detail}`)));
+
+  $("#tr-proc-table tbody").replaceChildren(...v.processes.map((p) => el("tr", { onclick: () => { $("#tr-process").value = p.name; loadTraffic(); } },
+    el("td", {}, p.name), el("td", {}, p.flows), el("td", {}, p.tcp), el("td", {}, p.udp), el("td", {}, p.unix),
+    el("td", {}, fmtBytes(p.upload)), el("td", {}, fmtBytes(p.download)),
+    el("td", {}, el("span", { class: "bar", "data-w": Math.round(p.proxied_share * 100) }), ` ${Math.round(p.proxied_share * 100)}%`))));
+  for (const b of document.querySelectorAll("#tr-proc-table .bar")) b.style.width = Math.max(1, Number(b.dataset.w) * 0.6) + "px";
+
+  loadTrafficFlows();
+  loadTrafficIfaces();
+}
+
+let trSelected = null;
+async function loadTrafficFlows() {
+  let flows;
+  try { flows = await api("/api/traffic/flows?limit=100&" + trQuery()); } catch { return; }
+  const path = (f) => [f.ingress, f.rule && (f.rule + (f.rule_payload ? " " + f.rule_payload : "")), f.node && (f.group && f.group !== f.node ? f.group + " → " + f.node : f.node), f.egress]
+    .filter(Boolean).join(" → ") || (f.internal ? "local IPC" : "–");
+  $("#tr-flow-table tbody").replaceChildren(...flows.map((f) => el("tr", { class: f.id === trSelected ? "active" : "", onclick: () => { trSelected = f.id; showFlow(f); loadTrafficFlows(); } },
+    el("td", {}, (f.process.name || "?") + (f.process.pid ? ` (${f.process.pid})` : "")),
+    el("td", {}, f.proto + (f.app ? "/" + f.app : "") + (f.family && f.family !== "unix" ? " · " + f.family : "")),
+    el("td", { class: "mono wrap" }, path(f), f.anomalies && f.anomalies.length ? el("span", { class: "warn-text", title: f.anomalies.map((a) => a.detail).join("\n") }, " ⚠") : null),
+    el("td", { class: "mono wrap" }, f.host ? `${f.host} (${f.remote})` : f.remote || f.local || "–"),
+    el("td", {}, f.bytes_unknown ? "–" : fmtBytes(f.upload + f.download)))));
+  if (!flows.length) $("#tr-flow-table tbody").append(el("tr", {}, el("td", { colspan: 5, class: "muted" }, "No flows.")));
+}
+
+function showFlow(f) {
+  const p = f.process;
+  const rows = [
+    ["Process", `${p.name}${p.pid ? " · pid " + p.pid : ""}`], ["Executable", p.path], ["App bundle", p.bundle && `${p.bundle}${p.bundle_id ? " (" + p.bundle_id + ")" : ""}`],
+    ["Parent", p.parent_name && `${p.parent_name} · pid ${p.parent_pid}`], ["Signed by", p.signature],
+    ["Socket", `${f.proto}${f.app ? "/" + f.app : ""} ${f.family} ${f.local || ""}${f.remote ? " → " + f.remote : ""}${f.state ? " [" + f.state + "]" : ""}`],
+    ["Captured by", f.ingress || (f.entered_tun ? "TUN" : "not captured")], ["Rule", f.rule && `${f.rule} ${f.rule_payload || ""}`],
+    ["Node", f.node && (f.group ? `${f.group} → ${f.node}` : f.node)], ["Leaves via", f.egress && `${f.egress}${f.next_hop ? " (next hop " + f.next_hop + ")" : ""}`],
+    ["Traffic", f.bytes_unknown ? "unknown (seen only in the socket table)" : `${fmtBytes(f.upload)} up · ${fmtBytes(f.download)} down`],
+  ].filter((r) => r[1]);
+  const box = $("#tr-flow-detail");
+  box.replaceChildren(
+    el("dl", {}, rows.flatMap(([k, v]) => [el("dt", {}, k), el("dd", { class: "mono wrap" }, v)])),
+    ...(f.anomalies || []).map((a) => el("p", { class: "warn-text" }, `⚠ ${ANOMALY_TITLE[a.kind] || a.kind}: ${a.detail}`)),
+    f.id.startsWith("conn-") ? el("p", {}, el("button", { class: "link", onclick: () => openDiagnostics(f.id.slice(5)) }, "Open in Connections: why did this go here?")) : null);
+}
+
+function openDiagnostics(id) {
+  selectedConn = id;
+  document.querySelector('nav button[data-tab="connections"]').click();
+}
+
+async function loadTrafficIfaces() {
+  let v;
+  try { v = await api("/api/traffic/interfaces?window=1m"); } catch { return; }
+  $("#tr-iface-table tbody").replaceChildren(...v.interfaces.map((i) => el("tr", { onclick: () => { $("#tr-iface").value = i.name; loadTraffic(); } },
+    el("td", { class: "mono" }, i.name), el("td", {}, i.role), el("td", {}, i.up ? "up" : "down"),
+    el("td", {}, i.rate ? fmtRate(i.rate.in_bps) : "–"), el("td", {}, i.rate ? fmtRate(i.rate.out_bps) : "–"),
+    el("td", {}, i.rate ? `${i.rate.errors} / ${i.rate.drops}` : "–"),
+    el("td", { class: "mono wrap" }, (i.route_list || []).slice(0, 6).join(", ") + (i.routes > 6 ? ` … (${i.routes} routes)` : ""))
+  )));
+  const r = v.reconcile;
+  $("#tr-reconcile").replaceChildren(
+    r.tun ? el("dl", {},
+      el("dt", {}, `Into ${r.tun} (apps → TUN)`), el("dd", {}, fmtBytes(r.tun_up)),
+      el("dt", {}, `Out of ${(r.nics || []).join(", ") || "NICs"}`), el("dd", {}, fmtBytes(r.nic_up)),
+      el("dt", {}, "Upstream gap"), el("dd", {}, (r.gap_up >= 0 ? "+" : "−") + fmtBytes(Math.abs(r.gap_up))),
+      el("dt", {}, "Downstream gap"), el("dd", {}, (r.gap_down >= 0 ? "+" : "−") + fmtBytes(Math.abs(r.gap_down)))) : null,
+    el("ul", { class: "events" }, (r.notes || []).map((n) => el("li", {}, n))));
+}
+
 // ---- refresh loop ----------------------------------------------------------
 
 function refresh() {
@@ -470,6 +670,7 @@ function refresh() {
   if (currentTab === "connections") { loadConnections(); if (selectedConn) loadDetail(); }
   if (currentTab === "rules") { loadRules(); loadTargets(); updateValueHints(); }
   if (currentTab === "network") { loadNetwork(); loadInstances(); }
+  if (currentTab === "traffic") loadTraffic();
 }
 
 refresh();
@@ -478,4 +679,5 @@ setInterval(() => {
   loadStatus();
   loadProposals();
   if (currentTab === "connections") loadConnections();
+  if (currentTab === "traffic" && $("#tr-mode").value === "live") loadTraffic();
 }, 2000);
