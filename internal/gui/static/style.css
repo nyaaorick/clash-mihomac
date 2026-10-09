@@ -125,3 +125,8 @@ tr.closed td { color: var(--muted); }
 .bad-text { color: var(--bad); }
 
 .log { max-height: 320px; overflow: auto; background: var(--code-bg); padding: 10px; border-radius: 6px; white-space: pre-wrap; word-break: break-all; margin: 8px 0 0; }
+
+.pack-form { display: grid; gap: 8px; margin: 10px 0; max-width: 640px; }
+.pack-form textarea { width: 100%; }
+#pack-preview pre { background: var(--code-bg); padding: 10px; border-radius: 6px; overflow: auto; max-height: 360px; white-space: pre-wrap; }
+details summary { cursor: pointer; margin-top: 10px; }

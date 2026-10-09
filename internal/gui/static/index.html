@@ -81,6 +81,21 @@
       <div class="card">
         <h2>Rule packs</h2>
         <div id="packs"></div>
+        <details id="pack-install">
+          <summary>Install a community pack</summary>
+          <form id="pack-form" class="pack-form">
+            <input id="pack-url" type="url" placeholder="https://example.com/pack.yaml">
+            <textarea id="pack-yaml" rows="6" class="mono" placeholder="…or paste a pack file here"></textarea>
+            <div id="pack-map"></div>
+            <label class="muted"><input id="pack-enable" type="checkbox" checked> Enable after installing</label>
+            <div class="actions"><button type="submit">Preview</button></div>
+          </form>
+          <p id="pack-error" class="error" hidden></p>
+          <div id="pack-preview" hidden>
+            <pre id="pack-diff" class="mono"></pre>
+            <div class="actions"><button id="pack-apply" class="primary" type="button">Install</button></div>
+          </div>
+        </details>
       </div>
       <div class="card">
         <h2>Final rule list <span class="muted small">(first match wins)</span></h2>

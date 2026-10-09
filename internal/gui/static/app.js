@@ -198,7 +198,9 @@ async function loadRules() {
     const on = (v.set.packs || []).includes(name);
     return el("label", { class: "pack" },
       el("input", { type: "checkbox", checked: on ? "" : null, onchange: (e) => changeRules(e.target.checked ? { enable_packs: [name] } : { disable_packs: [name] }) }),
-      el("strong", {}, name), el("span", { class: "muted" }, v.packs[name].description));
+      el("strong", {}, name), packBadge(v.packs[name], v.set.library || []),
+      el("span", { class: "muted" }, v.packs[name].description),
+      isInstalled(name, v.set.library || []) ? el("button", { type: "button", class: "link danger", onclick: (e) => { e.preventDefault(); removePack(name); } }, "remove") : null);
   }));
 
   const userRules = v.set.rules || [];
@@ -211,6 +213,56 @@ async function loadRules() {
     return el("tr", {}, el("td", {}, r.position), el("td", { class: "mono wrap" }, r.line), el("td", {}, describeSource(r.source)), el("td", {}, remove));
   }));
 }
+
+const isInstalled = (name, lib) => lib.some((p) => p.name === name);
+const packBadge = (p, lib) => el("span", { class: "muted small" }, isInstalled(p.name, lib) ? `v${p.version}${p.author ? " by " + p.author : ""}` : "built-in");
+
+async function removePack(name) {
+  try {
+    const diff = (await api("/api/rules/preview", { remove_packs: [name] })).diff;
+    if (!confirm(diff + "\nRemove this pack?")) return;
+  } catch { if (!confirm(`Remove pack ${name}?`)) return; }
+  changeRules({ remove_packs: [name] });
+}
+
+let packChange = null;
+function packRequest() {
+  const body = { enable: $("#pack-enable").checked, map: {} };
+  const url = $("#pack-url").value.trim();
+  if (url) body.url = url; else body.yaml = $("#pack-yaml").value;
+  for (const i of document.querySelectorAll("#pack-map input")) if (i.value.trim()) body.map[i.dataset.name] = i.value.trim();
+  return body;
+}
+
+$("#pack-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  packChange = null;
+  $("#pack-preview").hidden = true;
+  showError($("#pack-error"), null);
+  try {
+    const r = await api("/api/packs/preview", packRequest());
+    if (r.placeholders && r.placeholders.length) {
+      const have = Object.fromEntries([...document.querySelectorAll("#pack-map input")].map((i) => [i.dataset.name, i.value]));
+      $("#pack-map").replaceChildren(el("p", { class: "muted small" }, "This pack sends some traffic to targets you choose. Map each placeholder to DIRECT, REJECT, or one of your proxies or groups, then preview again."),
+        ...r.placeholders.map((ph) => el("label", { class: "pack" }, el("strong", {}, ph),
+          el("input", { "data-name": ph.slice(1), list: "target-list", placeholder: "target", value: have[ph.slice(1)] || "" }))));
+      return;
+    }
+    packChange = r.change;
+    $("#pack-diff").textContent = r.diff;
+    $("#pack-preview").hidden = false;
+  } catch (err) { showError($("#pack-error"), err); }
+});
+
+$("#pack-apply").addEventListener("click", async () => {
+  if (!packChange) return;
+  if (await changeRules(packChange)) {
+    packChange = null;
+    $("#pack-preview").hidden = true;
+    $("#pack-form").reset();
+    $("#pack-map").replaceChildren();
+  }
+});
 
 async function updateValueHints() {
   const t = $("#rule-type").value;

@@ -31,6 +31,7 @@ func (d *Daemon) api() http.Handler {
 	mux.HandleFunc("GET /api/rules", d.handleRules)
 	mux.HandleFunc("POST /api/rules/change", d.handleRuleChange)
 	mux.HandleFunc("POST /api/packs/preview", d.handlePackPreview)
+	mux.HandleFunc("POST /api/rules/preview", d.handleRulesPreview)
 	mux.HandleFunc("GET /api/proposals", d.handleProposals)
 	mux.HandleFunc("POST /api/proposals", d.handlePropose)
 	mux.HandleFunc("POST /api/proposals/{id}/{decision}", d.handleDecide)
@@ -206,6 +207,22 @@ func (d *Daemon) handleRuleChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.handleRules(w, r)
+}
+
+// handleRulesPreview dry-runs a change and returns its diff.
+func (d *Daemon) handleRulesPreview(w http.ResponseWriter, r *http.Request) {
+	var c rules.Change
+	if !readJSON(w, r, &c) {
+		return
+	}
+	d.mu.Lock()
+	diff, err := d.ruleSet.Diff(c)
+	d.mu.Unlock()
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]string{"diff": diff})
 }
 
 func (d *Daemon) handleProposals(w http.ResponseWriter, r *http.Request) {
