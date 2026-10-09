@@ -106,11 +106,7 @@ func (d *Daemon) checkNodes(ctx context.Context, only string) []string {
 // nodeTargets lists every proxy node to check: those in the user's config
 // and those imported from share links or managed servers.
 func (d *Daemon) nodeTargets() ([]health.Target, error) {
-	cfg, err := os.ReadFile(d.o.ConfigPath)
-	if err != nil {
-		return nil, err
-	}
-	targets, err := health.TargetsFromConfig(cfg)
+	targets, err := d.userTargets()
 	if err != nil {
 		return nil, err
 	}
@@ -118,6 +114,15 @@ func (d *Daemon) nodeTargets() ([]health.Target, error) {
 		targets = append(targets, health.TargetsFromProxies(vps.Proxies(nodes))...)
 	}
 	return targets, nil
+}
+
+// userTargets lists the proxy nodes in the user's own config file.
+func (d *Daemon) userTargets() ([]health.Target, error) {
+	cfg, err := os.ReadFile(d.o.ConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	return health.TargetsFromConfig(cfg)
 }
 
 func filterTargets(ts []health.Target, name string) []health.Target {
