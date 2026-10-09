@@ -69,18 +69,21 @@ func (c *fakeConn) Run(_ context.Context, cmd string, stdin []byte) (Result, err
 		f.Files = map[string]string{}
 		f.Stdin = map[string][]byte{}
 	}
+	// Commands arrive wrapped as sh -c '<quoted>'; undo one level of
+	// quoting so handlers match what the script itself says.
+	norm := strings.ReplaceAll(cmd, `'\''`, `'`)
 	// File uploads: `umask 077 && cat > 'path' && chmod ...`
 	if stdin != nil {
-		if i := strings.Index(cmd, "cat > '"); i >= 0 {
-			rest := cmd[i+len("cat > '"):]
+		if i := strings.Index(norm, "cat > '"); i >= 0 {
+			rest := norm[i+len("cat > '"):]
 			if j := strings.Index(rest, "'"); j >= 0 {
 				f.Files[rest[:j]] = string(stdin)
 			}
 		}
 	}
 	for _, h := range f.Handlers {
-		if strings.Contains(cmd, h.Match) {
-			return h.Reply(cmd, stdin), nil
+		if strings.Contains(norm, h.Match) || strings.Contains(cmd, h.Match) {
+			return h.Reply(norm, stdin), nil
 		}
 	}
 	return Result{}, nil

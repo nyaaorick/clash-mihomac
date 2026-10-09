@@ -25,4 +25,9 @@ reno
 @@firewall
 none
 @@pkg
+@@ours
+binary
+config
+active
+sing-box version 1.11.4
 @@end

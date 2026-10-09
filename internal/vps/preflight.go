@@ -26,6 +26,7 @@ echo "@@disk"; df -Pm / 2>/dev/null | awk 'NR==2{print $4}'
 echo "@@cc"; sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null; sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null
 echo "@@firewall"; if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then echo ufw; elif systemctl is-active firewalld >/dev/null 2>&1; then echo firewalld; else echo none; fi
 echo "@@pkg"; for p in apt-get dnf yum; do if command -v $p >/dev/null 2>&1; then echo $p; break; fi; done
+echo "@@ours"; [ -x /usr/local/bin/sing-box ] && echo binary; [ -f /etc/sing-box/config.json ] && echo config; [ -f /etc/systemd/system/sing-box.service ] && echo unit; systemctl is-active sing-box 2>/dev/null; /usr/local/bin/sing-box version 2>/dev/null | head -1
 echo "@@end"
 `
 
@@ -54,6 +55,7 @@ type Report struct {
 	PortsInUse map[int]string `json:"ports_in_use,omitempty"` // port → process
 	Existing   []string       `json:"existing,omitempty"`     // proxy services and directories found
 	OursFound  bool           `json:"ours_found"`             // a previous Clash Mihomac install
+	Ours       Install        `json:"ours"`
 	NTPSynced  *bool          `json:"ntp_synced,omitempty"`
 	MemMB      int            `json:"mem_mb,omitempty"`
 	DiskFreeMB int            `json:"disk_free_mb,omitempty"`
@@ -63,6 +65,18 @@ type Report struct {
 	PkgMgr     string         `json:"pkg_mgr,omitempty"`
 	Issues     []Issue        `json:"issues"`
 }
+
+// Install is what exists of a previous sing-box install.
+type Install struct {
+	Binary  bool   `json:"binary"`
+	Config  bool   `json:"config"`
+	Unit    bool   `json:"unit"`
+	Active  bool   `json:"active"`
+	Version string `json:"version,omitempty"`
+}
+
+// Any reports whether any part of an install exists.
+func (i Install) Any() bool { return i.Binary || i.Config || i.Unit }
 
 // Blocked reports whether any issue stops setup.
 func (r Report) Blocked() bool {
@@ -168,6 +182,23 @@ func ParsePreflight(out string) Report {
 		if len(cc) > 1 {
 			r.BBRActive = strings.TrimSpace(cc[len(cc)-1]) == "bbr"
 		}
+	}
+	for _, l := range sections["ours"] {
+		switch l = strings.TrimSpace(l); {
+		case l == "binary":
+			r.Ours.Binary = true
+		case l == "config":
+			r.Ours.Config = true
+		case l == "unit":
+			r.Ours.Unit = true
+		case l == "active":
+			r.Ours.Active = true
+		case strings.HasPrefix(l, "sing-box version "):
+			r.Ours.Version = strings.TrimPrefix(l, "sing-box version ")
+		}
+	}
+	if r.Ours.Any() {
+		r.OursFound = true
 	}
 	r.Firewall = first("firewall")
 	r.PkgMgr = first("pkg")

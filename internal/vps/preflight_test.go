@@ -53,6 +53,9 @@ func hasIssue(is []Issue, sev, substr string) bool {
 
 func TestAssessProblemServer(t *testing.T) {
 	r := ParsePreflight(readFixture(t, "preflight_problem.txt"))
+	if r.Ours != (Install{Binary: true, Config: true, Active: true, Version: "1.11.4"}) || !r.OursFound {
+		t.Errorf("previous install = %+v", r.Ours)
+	}
 	if r.Arch != "armv7l" || r.OursFound != true || r.Root || r.Systemd {
 		t.Errorf("report = %+v", r)
 	}
