@@ -1,0 +1,28 @@
+@@uid
+1000
+@@os
+PRETTY_NAME="Alpine Linux v3.19"
+ID=alpine
+@@arch
+armv7l
+@@systemd
+no
+@@listen
+tcp   LISTEN 0      511          0.0.0.0:443        0.0.0.0:*    users:(("nginx",pid=700,fd=6))
+@@services
+@@dirs
+/etc/v2ray-agent
+/etc/sing-box
+@@ntp
+no
+@@mem
+128
+@@disk
+100
+@@cc
+reno cubic
+reno
+@@firewall
+none
+@@pkg
+@@end
