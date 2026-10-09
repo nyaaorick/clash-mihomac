@@ -115,7 +115,7 @@ func guard(addr string, tok Tokens, next http.Handler) http.Handler {
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
-		h.Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'")
+		h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'")
 		h.Set("Cache-Control", "no-store")
 
 		// The URL printed by the CLI carries the full token once; trade it

@@ -462,6 +462,201 @@ async function runProbe(url, box) {
   }
 }
 
+// ---- servers ---------------------------------------------------------------
+
+const pctBar = (v, warnAt = 85) => el("span", { class: "meter" + (v >= warnAt ? " hot" : ""), title: Math.round(v) + "%" },
+  el("span", { class: "meter-fill", "data-w": Math.min(100, Math.round(v)) }));
+function fillMeters(root) { for (const m of root.querySelectorAll(".meter-fill")) m.style.width = m.dataset.w + "%"; }
+const fmtDur = (s) => s >= 86400 ? Math.floor(s / 86400) + " d" : s >= 3600 ? Math.floor(s / 3600) + " h" : Math.floor(s / 60) + " min";
+
+async function loadMachines() {
+  let ms;
+  try { ms = await api("/api/vps/machines"); } catch (e) { $("#machines").replaceChildren(el("p", { class: "error" }, e.message)); return; }
+  const box = $("#machines");
+  if (!ms.length) { box.replaceChildren(el("p", { class: "muted" }, "No servers yet. Set one up below.")); return; }
+  box.replaceChildren(...ms.map(machineCard));
+  fillMeters(box);
+}
+
+function machineCard(m) {
+  const l = m.last, mt = l && l.metrics;
+  const state = l ? l.state : "unknown";
+  const actions = [
+    ["Check now", () => machineCheck(m)], ["Restart proxy", () => machineAction(m, "restart")], ["Update core", () => machineAction(m, "upgrade")],
+    ["Rotate credentials", () => machineAction(m, "rotate")], ["Reboot", () => machineAction(m, "reboot")], ["Share…", () => machineShare(m)],
+    ["Quota…", () => machineQuota(m)], ["Turn off password login", () => machineDisablePw(m)], ["Remove…", () => machineRemove(m)],
+  ].map(([label, fn]) => el("button", { type: "button", class: "link", onclick: fn }, label));
+  return el("div", { class: "machine" },
+    el("div", { class: "machine-head" }, el("strong", {}, m.name), " ", el("span", { class: "muted" }, `${m.host}:${m.port}`), " ",
+      el("span", { class: "state " + (state === "online" ? "healthy" : state === "degraded" ? "degraded" : "down") }, state),
+      m.has_key ? null : el("span", { class: "warn-text small" }, " no stored key"),
+      m.node_name ? el("span", { class: "muted small" }, ` · node ${m.node_name}`) : null),
+    l && l.error ? el("p", { class: "error small" }, l.error) : null,
+    ...(l && l.reasons || []).map((r) => el("p", { class: "warn-text small" }, "⚠ " + r)),
+    mt ? el("dl", { class: "machine-metrics" },
+      el("dt", {}, "CPU"), el("dd", {}, pctBar(mt.cpu_percent), ` ${Math.round(mt.cpu_percent)}%`),
+      el("dt", {}, "Memory"), el("dd", {}, pctBar(mt.mem_used_percent), ` ${Math.round(mt.mem_used_percent)}% of ${mt.mem_total_mb} MB`),
+      el("dt", {}, "Disk"), el("dd", {}, pctBar(mt.disk_used_percent, 90), ` ${Math.round(mt.disk_used_percent)}% of ${mt.disk_total_gb.toFixed(0)} GB`),
+      el("dt", {}, "Load · uptime"), el("dd", {}, `${mt.load1.toFixed(2)} ${mt.load5.toFixed(2)} ${mt.load15.toFixed(2)} · ${fmtDur(mt.uptime_seconds)}`),
+      el("dt", {}, "Network"), el("dd", {}, `↓ ${fmtBytes(mt.rx_bps)}/s  ↑ ${fmtBytes(mt.tx_bps)}/s`),
+      el("dt", {}, "Traffic this period"), el("dd", {}, m.quota.gb ? [pctBar(m.quota_percent), ` ${m.traffic_used_gb.toFixed(1)} of ${m.quota.gb} GB`] : `${m.traffic_used_gb.toFixed(1)} GB (no allowance set)`),
+      el("dt", {}, "Proxy service"), el("dd", {}, `${mt.service_active ? "running" : "NOT running"}${mt.service_version ? " · sing-box " + mt.service_version : ""}${mt.listening && mt.listening.length ? " · ports " + mt.listening.join(", ") : ""}`),
+      ...(mt.certs || []).flatMap((c) => [el("dt", {}, "Certificate"), el("dd", {}, `${c.path} expires ${new Date(c.expires).toLocaleDateString()}`)]),
+    ) : el("p", { class: "muted small" }, l ? "" : "Not checked yet."),
+    l ? el("p", { class: "muted small" }, "Checked " + fmtTime(l.time)) : null,
+    el("div", { class: "machine-actions" }, actions));
+}
+
+const panel = () => $("#machine-panel");
+function showPanel(...children) { panel().hidden = false; panel().replaceChildren(...children.filter((c) => c !== null && c !== undefined), el("p", {}, el("button", { class: "link", type: "button", onclick: () => { panel().hidden = true; } }, "Close"))); panel().scrollIntoView({ block: "nearest" }); }
+
+async function machineCheck(m) {
+  showPanel(el("p", {}, `Checking ${m.name}…`));
+  try { await api(`/api/vps/machines/${m.id}/check`, {}); panel().hidden = true; } catch (e) { showPanel(el("p", { class: "error" }, e.message)); }
+  loadMachines();
+}
+
+function planView(prev) {
+  return [
+    prev.blocked && prev.blocked.length ? el("div", { class: "verdict" }, ...prev.blocked.map((b) => el("p", { class: "error" }, "✗ " + b))) : null,
+    el("ol", { class: "plan" }, prev.steps.map((s) => el("li", {}, el("strong", {}, s.title), el("div", { class: "muted small" }, s.why),
+      el("pre", { class: "mono" }, "$ " + s.cmd + (s.file ? `\n\n# writes ${s.file}:\n${s.body}` : ""))))),
+  ];
+}
+
+async function machineAction(m, kind) {
+  showPanel(el("p", {}, "Connecting to preview…"));
+  let prev;
+  try { prev = await api(`/api/vps/machines/${m.id}/preview`, { kind }); } catch (e) { showPanel(el("p", { class: "error" }, e.message)); return; }
+  const runBtn = el("button", { class: "primary", type: "button", disabled: prev.blocked.length ? "" : null, onclick: async () => {
+    runBtn.disabled = true;
+    try { const { job_id } = await api(`/api/vps/machines/${m.id}/run`, { plan_id: prev.plan_id }); followJob(job_id, loadMachines); } catch (e) { showPanel(el("p", { class: "error" }, e.message)); }
+  } }, `Run: ${kind}`);
+  showPanel(el("h2", {}, `${kind} on ${m.name}`), el("p", { class: "muted" }, "This is exactly what will run on the server."), ...planView(prev), runBtn);
+}
+
+async function followJob(id, done) {
+  const log = el("pre", { class: "mono log" }), status = el("p", {});
+  showPanel(status, log);
+  for (;;) {
+    let j;
+    try { j = await api("/api/vps/jobs/" + id); } catch (e) { status.textContent = e.message; return; }
+    log.textContent = j.log.map((l) => l.text).join("\n");
+    log.scrollTop = log.scrollHeight;
+    status.textContent = j.done ? (j.error ? "Failed: " + j.error : "Done.") : `Step ${j.step + 1} of ${j.steps}: ${j.current}`;
+    status.className = j.error ? "error" : "";
+    if (j.done) {
+      if (j.outcome) {
+        const o = j.outcome;
+        panel().insertBefore(el("div", { class: "verdict" },
+          o.node ? el("p", {}, `Node “${o.node}” imported${o.latency_ms ? `; ${o.latency_ms} ms end to end through it` : ""}.`) : null,
+          o.egress_ip ? el("p", {}, `Traffic leaves from ${o.egress_ip}; DNS on the server ${o.dns_ok ? "works" : "FAILED"}.`) : null,
+          ...(o.notes || []).map((n) => el("p", {}, "• " + n))), log);
+      }
+      if (done) done();
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 800));
+  }
+}
+
+async function machineShare(m) {
+  try {
+    const s = await api(`/api/vps/machines/${m.id}/share`);
+    showPanel(el("h2", {}, `Share ${m.node_name || m.name}`), el("p", { class: "warn-text" }, "These contain the node's credentials. Anyone with them can use your server."),
+      el("img", { src: "data:image/png;base64," + s.qr_png, width: 240, height: 240, alt: "QR code of the share link" }),
+      el("h2", { class: "spaced" }, "Share link"), el("pre", { class: "mono wrap" }, s.link),
+      el("h2", { class: "spaced" }, "Subscription (base64)"), el("pre", { class: "mono wrap" }, s.subscription),
+      el("p", { class: "muted small" }, "To invalidate these, rotate the server's credentials."));
+  } catch (e) { showPanel(el("p", { class: "error" }, e.message)); }
+}
+
+function machineQuota(m) {
+  const gb = el("input", { type: "number", min: 0, value: m.quota.gb || "", placeholder: "GB per month" });
+  const day = el("input", { type: "number", min: 1, max: 28, value: m.quota.reset_day || 1, placeholder: "reset day" });
+  showPanel(el("h2", {}, `Traffic allowance for ${m.name}`), el("div", { class: "toolbar" }, gb, day,
+    el("button", { class: "primary", type: "button", onclick: async () => {
+      try { await api(`/api/vps/machines/${m.id}/quota`, { gb: Number(gb.value) || 0, reset_day: Number(day.value) || 1 }); panel().hidden = true; loadMachines(); } catch (e) { alert(e.message); }
+    } }, "Save")));
+}
+
+async function machineDisablePw(m) {
+  if (!confirm(`Turn off SSH password login on ${m.name}? Only this Mac's key will work afterwards.`)) return;
+  try { const r = await api(`/api/vps/machines/${m.id}/disable-password`, { confirm: true }); showPanel(el("p", {}, r.result)); } catch (e) { showPanel(el("p", { class: "error" }, e.message)); }
+}
+
+function machineRemove(m) {
+  const un = el("input", { type: "checkbox" });
+  showPanel(el("h2", {}, `Remove ${m.name}`), el("p", {}, "Forgets this server, its stored key, and its imported node on this Mac."),
+    el("label", { class: "muted" }, un, " Also remove the proxy from the server"),
+    el("p", {}, el("button", { class: "primary danger-btn", type: "button", onclick: async () => {
+      try { await api(`/api/vps/machines/${m.id}/remove`, { confirm: true, uninstall: un.checked }); panel().hidden = true; loadMachines(); } catch (e) { showPanel(el("p", { class: "error" }, e.message)); }
+    } }, "Remove")));
+}
+
+let vpsPlan = null;
+$("#vps-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const err = $("#vps-error"), out = $("#vps-plan");
+  showError(err, null); out.hidden = true; $("#vps-log").hidden = true; vpsPlan = null;
+  const body = { host: $("#vps-host").value.trim(), password: $("#vps-password").value, name: $("#vps-name").value.trim(),
+    port: Number($("#vps-ssh-port").value) || 0, node_port: Number($("#vps-node-port").value) || 0, sni: $("#vps-sni").value.trim(), sha256: $("#vps-sha").value.trim(), mode: $("#vps-mode").value };
+  out.hidden = false; out.replaceChildren(el("p", {}, "Connecting and checking the server (read-only)…"));
+  try { vpsPlan = await api("/api/vps/preflight", body); } catch (x) { out.hidden = true; showError(err, x); return; }
+  const r = vpsPlan.report;
+  const confirmBox = el("input", { type: "checkbox" });
+  const run = el("button", { class: "primary", type: "button", disabled: "", onclick: async () => {
+    run.disabled = true;
+    try {
+      const { job_id } = await api("/api/vps/setup", { plan_id: vpsPlan.plan_id, host_key: vpsPlan.host_key });
+      $("#vps-password").value = "";
+      const log = $("#vps-log"); log.hidden = false;
+      for (;;) {
+        const j = await api("/api/vps/jobs/" + job_id);
+        log.textContent = j.log.map((l) => l.text).join("\n"); log.scrollTop = log.scrollHeight;
+        if (j.done) {
+          out.replaceChildren(j.error ? el("p", { class: "error" }, "Failed: " + j.error) : el("div", { class: "verdict" },
+            j.outcome && j.outcome.node ? el("p", {}, `Node “${j.outcome.node}” is imported${j.outcome.latency_ms ? ` and answers in ${j.outcome.latency_ms} ms end to end` : ""}.`) : null,
+            ...((j.outcome && j.outcome.notes) || []).map((n) => el("p", {}, "• " + n))));
+          loadMachines();
+          return;
+        }
+        out.replaceChildren(el("p", {}, `Step ${j.step + 1} of ${j.steps}: ${j.current}`));
+        await new Promise((res) => setTimeout(res, 800));
+      }
+    } catch (x) { showError(err, x); run.disabled = false; }
+  } }, "Run setup");
+  confirmBox.addEventListener("change", () => { run.disabled = !confirmBox.checked || vpsPlan.blocked.length > 0; });
+  out.replaceChildren(
+    el("p", {}, `${r.os || "Unknown OS"} · ${r.arch} · ${r.mem_mb} MB memory · ${r.disk_free_mb} MB free · mode: `, el("strong", {}, vpsPlan.mode)),
+    el("ul", { class: "events" }, (r.issues || []).map((i) => el("li", { class: i.severity === "error" ? "error" : i.severity === "warning" ? "warn-text" : "" }, `${{ error: "✗", warning: "!", info: "·" }[i.severity]} ${i.message}`))),
+    ...planView(vpsPlan),
+    el("div", { class: "verdict" }, el("p", {}, "The server's SSH fingerprint is ", el("code", {}, vpsPlan.host_key), ". Compare it with your provider's console if it shows one; a mismatch means you aren't talking to your server."),
+      el("label", {}, confirmBox, " The fingerprint is right and I want to run this plan")),
+    run);
+});
+
+// Import nodes
+let importPrev = null;
+$("#import-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const err = $("#import-error"), out = $("#import-preview");
+  showError(err, null); out.hidden = true; importPrev = null;
+  const body = {};
+  const file = $("#import-image").files[0];
+  if (file) body.image = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file); });
+  else body.text = $("#import-text").value;
+  try { importPrev = await api("/api/vps/import", body); } catch (x) { showError(err, x); return; }
+  out.hidden = false;
+  out.replaceChildren(
+    ...importPrev.errors.map((m) => el("p", { class: "warn-text small" }, "Skipped: " + m)),
+    el("table", {}, el("tbody", {}, importPrev.nodes.map((n) => el("tr", {}, el("td", {}, n.name), el("td", {}, n.type), el("td", { class: "mono" }, `${n.server}:${n.port}`),
+      el("td", {}, n.insecure ? el("span", { class: "warn-text" }, "certificate checks OFF") : ""))))),
+    importPrev.nodes.length ? el("p", {}, el("button", { class: "primary", type: "button", onclick: async () => {
+      try { const r = await api("/api/vps/import/apply", { import_id: importPrev.import_id }); out.replaceChildren(el("p", {}, "Imported: " + r.imported.join(", ") + (r.warning ? ". " + r.warning : ""))); $("#import-form").reset(); } catch (x) { showError(err, x); }
+    } }, `Import ${importPrev.nodes.length} node${importPrev.nodes.length === 1 ? "" : "s"}`)) : null);
+});
+
 // ---- traffic ---------------------------------------------------------------
 
 const SVGNS = "http://www.w3.org/2000/svg";
@@ -671,6 +866,7 @@ function refresh() {
   if (currentTab === "rules") { loadRules(); loadTargets(); updateValueHints(); }
   if (currentTab === "network") { loadNetwork(); loadInstances(); }
   if (currentTab === "traffic") loadTraffic();
+  if (currentTab === "servers") loadMachines();
 }
 
 refresh();
@@ -680,4 +876,5 @@ setInterval(() => {
   loadProposals();
   if (currentTab === "connections") loadConnections();
   if (currentTab === "traffic" && $("#tr-mode").value === "live") loadTraffic();
+  if (currentTab === "servers" && panel().hidden) loadMachines();
 }, 2000);

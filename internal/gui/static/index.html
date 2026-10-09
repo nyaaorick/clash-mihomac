@@ -15,6 +15,7 @@
       <button data-tab="overview" class="active">Overview</button>
       <button data-tab="connections">Connections</button>
       <button data-tab="rules">Rules <span id="pending-badge" class="badge" hidden></span></button>
+      <button data-tab="servers">Servers</button>
       <button data-tab="traffic">Traffic</button>
       <button data-tab="network">Network</button>
     </nav>
@@ -106,6 +107,48 @@
             <tbody></tbody>
           </table>
         </div>
+      </div>
+    </section>
+
+    <section id="tab-servers" hidden>
+      <div class="card">
+        <h2>Your servers</h2>
+        <p class="muted small">Servers are checked every few minutes over SSH. Nothing is installed on them beyond the proxy itself, and every change is previewed first.</p>
+        <div id="machines"></div>
+        <div id="machine-panel" hidden></div>
+      </div>
+      <div class="card">
+        <h2>Set up a new server</h2>
+        <p class="muted small">Enter the IPv4 address and root password of a fresh VPS. The password is used for this setup only and is never stored; afterwards the server is managed with a key.</p>
+        <form id="vps-form" class="pack-form">
+          <input id="vps-host" placeholder="Server IPv4 address" required autocomplete="off">
+          <input id="vps-password" type="password" placeholder="Root password" required autocomplete="off">
+          <input id="vps-name" placeholder="Name (optional)" autocomplete="off">
+          <details><summary>Advanced</summary>
+            <div class="pack-form">
+              <input id="vps-ssh-port" type="number" placeholder="SSH port (22)">
+              <input id="vps-node-port" type="number" placeholder="Proxy port (443)">
+              <input id="vps-sni" placeholder="Reality disguise site (www.microsoft.com)">
+              <input id="vps-sha" placeholder="Proxy release SHA-256 (required until one is pinned)" class="mono">
+              <select id="vps-mode"><option value="">Mode: decide from what the server has</option><option>install</option><option>repair</option><option>upgrade</option><option>reinstall</option></select>
+            </div>
+          </details>
+          <div class="actions"><button type="submit">Check the server and show the plan</button></div>
+        </form>
+        <p id="vps-error" class="error" hidden></p>
+        <div id="vps-plan" hidden></div>
+        <pre id="vps-log" class="mono log" hidden></pre>
+      </div>
+      <div class="card">
+        <h2>Import nodes</h2>
+        <p class="muted small">From share links (vless://, vmess://, trojan://, ss://, hysteria2://), a subscription, or a QR code image. Imported nodes are kept apart from your config file.</p>
+        <form id="import-form" class="pack-form">
+          <textarea id="import-text" rows="4" class="mono" placeholder="Paste share links or a subscription here"></textarea>
+          <label class="muted small">…or a QR code image: <input id="import-image" type="file" accept="image/png,image/jpeg"></label>
+          <div class="actions"><button type="submit">Preview</button></div>
+        </form>
+        <p id="import-error" class="error" hidden></p>
+        <div id="import-preview" hidden></div>
       </div>
     </section>
 

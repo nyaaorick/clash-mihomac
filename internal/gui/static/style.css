@@ -153,3 +153,17 @@ details summary { cursor: pointer; margin-top: 10px; }
 #tr-flow-table tbody tr { cursor: pointer; }
 .warn-text { color: #b7791f; }
 .sankey .node text { paint-order: stroke; stroke: var(--card); stroke-width: 3px; }
+
+.machine { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+.machine-head { margin-bottom: 6px; }
+.machine-metrics { display: grid; grid-template-columns: 160px 1fr; gap: 2px 12px; margin: 8px 0; }
+.machine-metrics dt { color: var(--muted); }
+.machine-metrics dd { margin: 0; }
+.machine-actions { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.meter { display: inline-block; width: 120px; height: 8px; background: var(--code-bg); border-radius: 4px; vertical-align: middle; overflow: hidden; }
+.meter-fill { display: block; height: 100%; background: var(--ok); }
+.meter.hot .meter-fill { background: var(--bad); }
+#machine-panel { border-top: 1px solid var(--border); margin-top: 12px; padding-top: 12px; }
+ol.plan { padding-left: 20px; }
+ol.plan pre { background: var(--code-bg); padding: 8px; border-radius: 6px; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 4px 0 10px; }
+.danger-btn { background: var(--bad); }
