@@ -52,6 +52,7 @@ Diagnostics:
 
 Other:
   island            Run as the island4mac plugin (the daemon in-process, the tab on stdin/stdout)
+  --describe        Print the island plugin's plugin.json (island-plugin builds and publishes it from this)
   mcp               Run the MCP server on stdio (mcp --setup prints client setup)
   logs              Show the daemon's log, or Clash Verge's (--source verge)
   version           Print the Clash Mihomac version
@@ -75,6 +76,8 @@ func main() {
 	}
 	var err error
 	switch {
+	case cmd == "--describe":
+		err = cmdDescribe() // the island plugin's plugin.json, for island-plugin
 	case cmd == "version":
 		fmt.Printf("mihomac %s (%s build)\n", buildinfo.Version, buildinfo.Channel)
 	case cmd == "help" || cmd == "-h" || cmd == "--help":

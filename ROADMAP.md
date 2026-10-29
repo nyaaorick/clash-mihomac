@@ -66,10 +66,10 @@ Both talk to the same Clash Verge.
 
 `mihomac island` runs Clash Mihomac as a plugin of [island4mac](https://github.com/nyaaorick/island4mac): the daemon, dashboard and MCP server run in that one process, and the island's "Clash" tab shows the core, its mode (three switches), the rules and whether they are loaded, the nodes with delay and health, and warnings, with buttons for the dashboard, a node check and a Verge restart. `cmd/mihomac/island.go` speaks the plugin protocol (JSON lines on stdin and stdout, documented in island4mac's `spec/docs/04-plugin-protocol.md`); `renderIsland` is pure and tested.
 
-- `make plugin` builds `build/plugin/mihomac/` (plugin.json from `plugin/`, a universal ad-hoc-signed binary) and `build/plugin/mihomac.zip` for Settings > Plugins > Install from File; `make plugin-install` copies it into `~/Library/Application Support/island4mac/Plugins/mihomac` (`PLUGINS_DIR=…` for another folder).
+- This module lives in the plugins repo (island4mac-plugins, as `mihomac/`) beside the Swift plugins, and its CI builds and publishes it the same way: `island-plugin build --all` sees the `go.mod`, builds `./cmd/mihomac` for arm64 and amd64, joins them with lipo, signs ad hoc, and asks the program for its plugin.json with `mihomac --describe` (`describePlugin` in `cmd/mihomac/island.go`, where `pluginVersion` is bumped with each change that ships). `island-plugin dev` installs it into the app and rebuilds on every change; `island-plugin build` writes `build/mihomac/` and `build/mihomac.zip` for Settings > Plugins > Install from File. Under the island the program runs as the stable channel (dashboard on 9991) unless `MIHOMAC_CHANNEL=debug`.
 - The data directory is the one the island gives the plugin (`ISLAND_DATA_DIR`, kept across plugin updates). The first time it runs, it moves what a standalone install kept in `~/Library/Application Support/Mihomac/<channel>` into it (everything but the state file and logs). After that, point the CLI at it: `MIHOMAC_HOME="$HOME/Library/Application Support/island4mac/PluginData/mihomac" mihomac rules`.
 - It uses the stable channel's GUI port (9991). A standalone `mihomac start` holding that port shows in the tab as the reason the plugin isn't running; `mihomac stop` frees it.
-- It needs no privileges and asks the island for none. Bump `version` in `plugin/plugin.json` with each change that ships.
+- It needs no privileges and asks the island for none. Bump `pluginVersion` in `cmd/mihomac/island.go` with each change that ships.
 
 ---
 

@@ -31,7 +31,56 @@ import (
 // data directory is the one the island hands us (ISLAND_DATA_DIR), so an
 // update of the plugin never touches rules, nodes or history. Documented in
 // island4mac's spec/docs/04-plugin-protocol.md.
+// pluginVersion is the island plugin's version, the one plugin.json and the
+// catalog show. Bump it with each change of the plugin that ships; the
+// program's own version (buildinfo.Version) is the companion's.
+const pluginVersion = "0.1.0"
+
+// pluginProtocol is the island protocol version this plugin speaks.
+const pluginProtocol = 7
+
+// pluginManifest is the plugin.json the island reads, printed by `--describe`
+// so island-plugin (the plugins repo's tool and CI) builds and publishes this
+// module like any IslandKit plugin.
+type pluginManifest struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Symbol      string   `json:"symbol"`
+	Version     string   `json:"version"`
+	Protocol    int      `json:"protocol"`
+	Command     []string `json:"command"`
+	Description string   `json:"description"`
+	Background  bool     `json:"background"`
+}
+
+func describePlugin() pluginManifest {
+	return pluginManifest{
+		ID:          "mihomac",
+		Name:        "Clash",
+		Symbol:      "network",
+		Version:     pluginVersion,
+		Protocol:    pluginProtocol,
+		Command:     []string{"./mihomac", "island"},
+		Description: "Clash Verge at a glance: the core, its mode, your rules and node health, from the companion that runs the diagnostics dashboard and MCP server",
+		Background:  true,
+	}
+}
+
+// cmdDescribe prints plugin.json: `mihomac --describe`.
+func cmdDescribe() error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(describePlugin())
+}
+
 func cmdIsland(args []string) error {
+	// island-plugin builds without ldflags, so this is the debug channel by
+	// default; under the island the data directory is the island's and the
+	// dashboard should sit on the stable port. MIHOMAC_CHANNEL=debug keeps a
+	// development build apart.
+	if os.Getenv("ISLAND_DATA_DIR") != "" && os.Getenv("MIHOMAC_CHANNEL") != "debug" {
+		buildinfo.Channel = "stable"
+	}
 	home, err := islandHome()
 	if err != nil {
 		return err
