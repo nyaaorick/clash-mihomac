@@ -5,15 +5,14 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/nyaaorick/clash-mihomac/internal/gui"
-	"github.com/nyaaorick/clash-mihomac/internal/helper"
 	"github.com/nyaaorick/clash-mihomac/internal/netstate"
-	"github.com/nyaaorick/clash-mihomac/internal/runtimecfg"
 	"github.com/nyaaorick/clash-mihomac/internal/traffic"
 )
 
@@ -52,32 +51,15 @@ type nodeAddrEntry struct {
 	addrs []netip.Addr
 }
 
-// helperSockets reads the socket table through the privileged helper,
-// which sees every process; without the helper it falls back to lsof.
-type helperSockets struct {
-	d        *Daemon
-	fallback traffic.SocketSource
-}
-
-func (h helperSockets) Sockets(ctx context.Context) ([]traffic.Socket, error) {
-	var res helper.SocketsResult
-	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	if err := h.d.helperCall(cctx, "sockets", struct{}{}, &res); err == nil {
-		return res.Sockets, nil
-	}
-	return h.fallback.Sockets(ctx)
-}
-
 func (d *Daemon) initTraffic() {
 	run := netstate.ExecRunner{}
 	d.traffic = &trafficState{
-		store:     traffic.OpenStore(d.inst.Path("traffic-history.jsonl"), traffic.DefaultRetention),
+		store:     traffic.OpenStore(d.path("traffic-history.jsonl"), traffic.DefaultRetention),
 		collector: &traffic.Collector{Run: run},
 		seenOnce:  map[string]int{},
 		addrs:     map[string]nodeAddrEntry{},
 	}
-	d.traffic.collector.Sockets = helperSockets{d: d, fallback: traffic.LsofSockets{Run: run}}
+	d.traffic.collector.Sockets = traffic.LsofSockets{Run: run}
 }
 
 // pollTraffic builds the flow view every few seconds.
@@ -112,17 +94,13 @@ func (d *Daemon) pollTrafficOnce(ctx context.Context) {
 	tr := d.traffic
 
 	d.mu.Lock()
-	mode, corePID := d.mode, 0
-	if d.core != nil {
-		corePID = d.core.PID()
-	}
+	tun, own := d.runtime.TUN, d.runtime.TUNDevice
 	d.mu.Unlock()
+	if !tun {
+		own = ""
+	}
 
 	state := tr.collector.Read(pctx)
-	own := ""
-	if mode == runtimecfg.ModeTUN {
-		own = d.inst.TUNDevice
-	}
 
 	var conns []traffic.Conn
 	for _, c := range d.tracker.List("", 5000) {
@@ -138,8 +116,8 @@ func (d *Daemon) pollTrafficOnce(ctx context.Context) {
 
 	flows := traffic.Join(traffic.Inputs{
 		Time: state.Time, Conns: conns, Sockets: state.Sockets, Routes: state.Routes, PS: state.PS,
-		TUNMode: mode == runtimecfg.ModeTUN, OwnTUN: own, DefaultIface: d.defaultInterface(pctx),
-		AddrOwner: state.AddrOwner, NodeAddrs: d.nodeAddrs, IgnorePIDs: []int{corePID},
+		TUNMode: tun, OwnTUN: own, DefaultIface: d.defaultInterface(pctx),
+		AddrOwner: state.AddrOwner, NodeAddrs: d.nodeAddrs, IgnorePIDs: corePIDs(state.PS),
 	})
 	tr.collector.Enrich(pctx, flows)
 
@@ -340,7 +318,7 @@ type TrafficInterfaces struct {
 }
 
 func (d *Daemon) handleTrafficInterfaces(w http.ResponseWriter, r *http.Request) {
-	ifs, err := Interfaces(r.Context(), netstate.ExecRunner{}, d.inst.TUNDevice)
+	ifs, err := Interfaces(r.Context(), netstate.ExecRunner{}, d.tunDevice())
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -395,4 +373,17 @@ func (d *Daemon) handleTrafficClear(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]bool{"cleared": true})
+}
+
+// corePIDs finds mihomo in the process table, so its own sockets (the
+// proxy's outbound connections) aren't attributed as application traffic.
+func corePIDs(ps map[int]traffic.PSEntry) []int {
+	var out []int
+	for pid, e := range ps {
+		switch filepath.Base(e.Path) {
+		case "verge-mihomo", "verge-mihomo-alpha", "mihomo", "clash-meta":
+			out = append(out, pid)
+		}
+	}
+	return out
 }

@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/nyaaorick/clash-mihomac/internal/gui"
-	"github.com/nyaaorick/clash-mihomac/internal/instance"
 	"github.com/nyaaorick/clash-mihomac/internal/vps"
 )
 
@@ -83,7 +82,7 @@ type JobOutcome struct {
 }
 
 func (d *Daemon) initVPS() {
-	home, _ := instance.Home()
+	home := d.home
 	d.vps = &vpsState{
 		store:   &vps.Store{Dir: home + "/vps"},
 		dialer:  vps.SSHDialer{},
@@ -352,7 +351,7 @@ func (d *Daemon) handleVPSJob(w http.ResponseWriter, r *http.Request) {
 func (d *Daemon) runSetup(job *vpsJob, p *pendingPlan) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
-	home, _ := instance.Home()
+	home := d.home
 	logPath := fmt.Sprintf("%s/vps/logs/%s-%s.log", home, safeFile(p.req.Host), time.Now().Format("20060102-150405"))
 	log, err := vps.NewSessionLog(p.plan.Redactor(p.target.Password), logPath)
 	if err != nil {
@@ -470,15 +469,12 @@ func (d *Daemon) importLink(ctx context.Context, link, machineID string, log *vp
 
 // addNodes saves nodes as imported, without reloading.
 func (d *Daemon) addNodes(nodes []vps.Node, machineID string) ([]string, error) {
-	path := d.inst.Path("nodes.yaml")
+	path := d.path("nodes.yaml")
 	list, err := vps.LoadNodes(path)
 	if err != nil {
 		return nil, err
 	}
-	taken := map[string]bool{}
-	if ts, err := userNodeNames(d.o.ConfigPath); err == nil {
-		taken = ts
-	}
+	taken := d.profileNodeNames()
 	var add []vps.Imported
 	for _, n := range nodes {
 		add = append(add, vps.Imported{Node: n, Machine: machineID, Added: time.Now()})
@@ -552,16 +548,13 @@ func (d *Daemon) switchToKeyLogin(ctx context.Context, conn vps.Conn, m *vps.Mac
 	return nil
 }
 
-func userNodeNames(configPath string) (map[string]bool, error) {
-	targets, err := (&Daemon{o: Options{ConfigPath: configPath}}).userTargets()
-	if err != nil {
-		return nil, err
-	}
+func (d *Daemon) profileNodeNames() map[string]bool {
 	m := map[string]bool{}
+	targets, _ := d.profileTargets()
 	for _, t := range targets {
 		m[t.Name] = true
 	}
-	return m, nil
+	return m
 }
 
 // ---- machines ----
@@ -823,7 +816,7 @@ func (d *Daemon) handleVPSActionRun(w http.ResponseWriter, r *http.Request) {
 func (d *Daemon) runAction(job *vpsJob, p *pendingPlan, m vps.Machine) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
-	home, _ := instance.Home()
+	home := d.home
 	log, err := vps.NewSessionLog(p.plan.Redactor(), fmt.Sprintf("%s/vps/logs/%s-%s-%s.log", home, safeFile(m.Host), p.kind, time.Now().Format("20060102-150405")))
 	if err != nil {
 		job.finish(nil, err)
@@ -944,14 +937,14 @@ func (d *Daemon) handleVPSRemove(w http.ResponseWriter, r *http.Request) {
 		notes = append(notes, "The proxy was removed from the server.")
 	}
 	// Forget the node and the machine.
-	if nodes, err := vps.LoadNodes(d.inst.Path("nodes.yaml")); err == nil {
+	if nodes, err := vps.LoadNodes(d.path("nodes.yaml")); err == nil {
 		keep := nodes[:0]
 		for _, n := range nodes {
 			if n.Machine != m.ID {
 				keep = append(keep, n)
 			}
 		}
-		vps.SaveNodes(d.inst.Path("nodes.yaml"), keep)
+		vps.SaveNodes(d.path("nodes.yaml"), keep)
 	}
 	if err := d.vps.store.Remove(m.ID); err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())

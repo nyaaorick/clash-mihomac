@@ -11,30 +11,25 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/nyaaorick/clash-mihomac/internal/instance"
 )
 
-// State describes a running instance. The daemon writes it once mihomo is
-// ready and removes it on exit.
+// State describes the running daemon. It is written once the API is up
+// and removed on exit, so the CLI knows where to find the daemon.
 type State struct {
-	Instance       string    `json:"instance"`
-	PID            int       `json:"pid"`
-	CorePID        int       `json:"core_pid"`
-	Mode           string    `json:"mode"`
-	CoreVersion    string    `json:"core_version"`
-	ConfigPath     string    `json:"config_path"`
-	MixedPort      int       `json:"mixed_port"`
-	ControllerPort int       `json:"controller_port"`
-	GUIURL         string    `json:"gui_url"`
-	StartedAt      time.Time `json:"started_at"`
+	PID       int       `json:"pid"`
+	GUIURL    string    `json:"gui_url"`
+	VergeDir  string    `json:"verge_dir"`
+	StartedAt time.Time `json:"started_at"`
 }
 
-func statePath(inst instance.Instance) string { return inst.Path("state.json") }
+// StateFile is the state file's name under the data directory.
+const StateFile = "state.json"
+
+func statePath(home string) string { return filepath.Join(home, StateFile) }
 
 // ReadState returns the saved state, or ok=false if none exists.
-func ReadState(inst instance.Instance) (st State, ok bool, err error) {
-	data, err := os.ReadFile(statePath(inst))
+func ReadState(home string) (st State, ok bool, err error) {
+	data, err := os.ReadFile(statePath(home))
 	if errors.Is(err, fs.ErrNotExist) {
 		return State{}, false, nil
 	}
@@ -47,20 +42,20 @@ func ReadState(inst instance.Instance) (st State, ok bool, err error) {
 	return st, true, nil
 }
 
-func writeState(inst instance.Instance, st State) error {
+func writeState(home string, st State) error {
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := statePath(inst) + ".tmp"
+	tmp := statePath(home) + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, statePath(inst))
+	return os.Rename(tmp, statePath(home))
 }
 
-func removeState(inst instance.Instance) error {
-	err := os.Remove(statePath(inst))
+func removeState(home string) error {
+	err := os.Remove(statePath(home))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -73,37 +68,22 @@ func IsRunning(st State) bool {
 	return processIs(st.PID, "mihomac")
 }
 
-// Stop terminates the instance's daemon, which stops its core and restores
-// the network. If the daemon died without cleaning up, a user-mode core
-// wrapper still running is stopped too; a TUN core belongs to the helper,
-// whose watchdog has already ended that session. It reports whether
-// anything was stopped.
-func Stop(inst instance.Instance, timeout time.Duration) (bool, error) {
-	st, ok, err := ReadState(inst)
+// Stop terminates the daemon. Nothing else needs cleaning up: mihomo,
+// TUN, and the system proxy belong to Clash Verge and keep running. It
+// reports whether anything was stopped.
+func Stop(home string, timeout time.Duration) (bool, error) {
+	st, ok, err := ReadState(home)
 	if err != nil || !ok {
 		return false, err
 	}
 	stopped := false
-	procs := []struct {
-		pid  int
-		name string
-	}{{st.PID, "mihomac"}}
-	if st.Mode != "tun" {
-		procs = append(procs, struct {
-			pid  int
-			name string
-		}{st.CorePID, "mihomac"})
-	}
-	for _, p := range procs {
-		if !processIs(p.pid, p.name) {
-			continue
-		}
-		if err := terminate(p.pid, timeout); err != nil {
-			return stopped, err
+	if processIs(st.PID, "mihomac") {
+		if err := terminate(st.PID, timeout); err != nil {
+			return false, err
 		}
 		stopped = true
 	}
-	return stopped, removeState(inst)
+	return stopped, removeState(home)
 }
 
 // terminate sends SIGTERM, then SIGKILL if pid is still alive after timeout.

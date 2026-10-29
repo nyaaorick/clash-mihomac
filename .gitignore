@@ -2,3 +2,4 @@
 /dist/
 /.mihomac-dev/
 .DS_Store
+/build/

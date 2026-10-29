@@ -15,8 +15,8 @@ import (
 
 	"github.com/nyaaorick/clash-mihomac/internal/gui"
 	"github.com/nyaaorick/clash-mihomac/internal/health"
-	"github.com/nyaaorick/clash-mihomac/internal/instance"
 	"github.com/nyaaorick/clash-mihomac/internal/traffic"
+	"github.com/nyaaorick/clash-mihomac/internal/verge"
 	"github.com/nyaaorick/clash-mihomac/internal/vps"
 )
 
@@ -81,10 +81,10 @@ func newVPSEnv(t *testing.T) *vpsEnv {
 	}))
 	t.Cleanup(ctrl.Close)
 
-	inst, _ := instance.Get(home, "debug")
-	os.MkdirAll(inst.Dir, 0o700)
-	cfg := filepath.Join(home, "config.yaml")
-	os.WriteFile(cfg, []byte("proxies: []\nrules: []\n"), 0o600)
+	vd := verge.Dir(t.TempDir())
+	os.MkdirAll(vd.Path("profiles"), 0o700)
+	os.WriteFile(vd.Path(verge.RuntimeFile), []byte("mixed-port: 7897\nexternal-controller: '"+strings.TrimPrefix(ctrl.URL, "http://")+"'\nsecret: s\nproxies: []\nrules: [MATCH,DIRECT]\n"), 0o600)
+	os.WriteFile(vd.Path(verge.ProfilesFile), []byte("items: []\n"), 0o600)
 	env.srv = &vps.FakeServer{Handlers: []vps.FakeHandler{
 		vps.Reply("@@uid", preflightText, 0),
 		vps.Reply("systemctl is-active sing-box", "active\n", 0),
@@ -94,12 +94,17 @@ func newVPSEnv(t *testing.T) *vpsEnv {
 		vps.Reply("getent hosts", "93.184.216.34 example.com\n", 0),
 	}}
 	d := &Daemon{
-		o: Options{ConfigPath: cfg}, inst: inst, mode: "port-only",
-		ctrl:      controller{addr: strings.TrimPrefix(ctrl.URL, "http://"), secret: "s"},
-		health:    health.LoadHistory(inst.Path("health.json")),
+		o: Options{Home: home, Verge: vd}, home: home,
+		ctrl:      tcpController(strings.TrimPrefix(ctrl.URL, "http://"), "s"),
+		health:    health.LoadHistory(filepath.Join(home, "health.json")),
 		tracker:   NewTracker(),
-		proposals: LoadProposals(inst.Path("proposals.json")),
+		proposals: LoadProposals(filepath.Join(home, "proposals.json")),
 	}
+	d.mu.Lock()
+	d.refreshRuntime()
+	d.recompile()
+	d.mihomoVersion = "test"
+	d.mu.Unlock()
 	d.traffic = &trafficState{store: traffic.OpenStore("", time.Hour), seenOnce: map[string]int{}, addrs: map[string]nodeAddrEntry{}}
 	d.initVPS()
 	d.vps.dialer = env.srv
@@ -204,7 +209,7 @@ func TestSetupEndToEnd(t *testing.T) {
 	}
 
 	// The node is imported and usable.
-	nodes, _ := vps.LoadNodes(e.d.inst.Path("nodes.yaml"))
+	nodes, _ := vps.LoadNodes(e.d.path("nodes.yaml"))
 	if len(nodes) != 1 || nodes[0].Name != "Tokyo" || nodes[0].Proxy["type"] != "vless" || nodes[0].Machine != o.Machine.ID {
 		t.Errorf("nodes = %+v", nodes)
 	}
@@ -345,7 +350,7 @@ func TestMachineActionsAndRotation(t *testing.T) {
 	if len(e.srv.Log) <= cmdsBefore || e.srv.Files["/etc/sing-box/config.json"] == "" || strings.Contains(e.srv.Files["/etc/sing-box/config.json"], creds.UUID) {
 		t.Error("the server's config wasn't replaced with new credentials")
 	}
-	nodes, _ := vps.LoadNodes(e.d.inst.Path("nodes.yaml"))
+	nodes, _ := vps.LoadNodes(e.d.path("nodes.yaml"))
 	if len(nodes) != 1 || nodes[0].Proxy["uuid"] == creds.UUID {
 		t.Errorf("imported node after rotation = %+v", nodes)
 	}
@@ -385,7 +390,7 @@ func TestMachineActionsAndRotation(t *testing.T) {
 	if ms, _ := e.d.vps.store.List(); len(ms) != 0 {
 		t.Errorf("machines left: %+v", ms)
 	}
-	if nodes, _ := vps.LoadNodes(e.d.inst.Path("nodes.yaml")); len(nodes) != 0 {
+	if nodes, _ := vps.LoadNodes(e.d.path("nodes.yaml")); len(nodes) != 0 {
 		t.Errorf("nodes left: %+v", nodes)
 	}
 	if _, err := os.Stat(filepath.Join(e.home, "vps", "keys", m.ID)); !os.IsNotExist(err) {

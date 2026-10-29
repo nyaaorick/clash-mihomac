@@ -45,7 +45,6 @@ func cmdVPS(args []string) error {
 	sub, rest := args[0], args[1:]
 	fs := flag.NewFlagSet("vps "+sub, flag.ExitOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, vpsUsage) }
-	name := instanceFlag(fs)
 	host := fs.String("host", "", "server IPv4 address")
 	label := fs.String("name", "", "name for the server and its node")
 	sshPort := fs.Int("ssh-port", 22, "SSH port")
@@ -67,7 +66,7 @@ func cmdVPS(args []string) error {
 		pos = append(pos, fs.Arg(0))
 		r = fs.Args()[1:]
 	}
-	api, _, err := apiFor(*name)
+	api, err := apiFor()
 	if err != nil {
 		return err
 	}

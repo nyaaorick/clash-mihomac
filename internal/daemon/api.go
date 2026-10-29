@@ -14,10 +14,9 @@ import (
 
 	"github.com/nyaaorick/clash-mihomac/internal/gui"
 	"github.com/nyaaorick/clash-mihomac/internal/health"
-	"github.com/nyaaorick/clash-mihomac/internal/helper"
 	"github.com/nyaaorick/clash-mihomac/internal/netstate"
 	"github.com/nyaaorick/clash-mihomac/internal/rules"
-	"github.com/nyaaorick/clash-mihomac/internal/runtimecfg"
+	"github.com/nyaaorick/clash-mihomac/internal/verge"
 )
 
 // api returns the /api/ handlers. Authentication and scopes are enforced
@@ -25,7 +24,9 @@ import (
 func (d *Daemon) api() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/status", d.handleStatus)
-	mux.HandleFunc("POST /api/mode", d.handleMode)
+	mux.HandleFunc("POST /api/verge/restart", d.handleVergeRestart)
+	mux.HandleFunc("POST /api/verge/apply", d.handleVergeApply)
+	mux.HandleFunc("POST /api/verge/mode", d.handleVergeMode)
 	mux.HandleFunc("GET /api/connections", d.handleConnections)
 	mux.HandleFunc("GET /api/connections/{id}", d.handleConnection)
 	mux.HandleFunc("POST /api/probe", d.handleProbe)
@@ -59,47 +60,44 @@ func (d *Daemon) api() http.Handler {
 	mux.HandleFunc("GET /api/vps/machines/{id}/share", d.handleVPSShare)
 	mux.HandleFunc("POST /api/vps/import", d.handleVPSImport)
 	mux.HandleFunc("POST /api/vps/import/apply", d.handleVPSImportApply)
-	mux.HandleFunc("GET /api/instances", d.handleInstances)
 	mux.HandleFunc("GET /api/logs", d.handleLogs)
 	return mux
 }
 
 // Status is GET /api/status.
 type Status struct {
-	Instance      string         `json:"instance"`
-	Channel       string         `json:"channel"`
-	Mode          string         `json:"mode"`
-	Modes         []string       `json:"modes"`
-	MixedPort     int            `json:"mixed_port"`
-	TUNDevice     string         `json:"tun_device"`
-	CoreVersion   string         `json:"core_version"`
-	MihomoVersion string         `json:"mihomo_version"`
-	ConfigPath    string         `json:"config_path"`
-	StartedAt     time.Time      `json:"started_at"`
-	Helper        HelperStatus   `json:"helper"`
-	Rules         map[string]int `json:"rules"`
-	Warnings      []string       `json:"warnings"`
-	Events        []Event        `json:"events"`
+	Channel        string         `json:"channel"`
+	StartedAt      time.Time      `json:"started_at"`
+	Verge          VergeStatus    `json:"verge"`
+	HasRules       bool           `json:"has_rules"`       // the user has rules, packs, groups, or imported nodes
+	RulesActive    bool           `json:"rules_active"`    // the running core has this daemon's rules
+	PendingRestart bool           `json:"pending_restart"` // the Merge file is ahead of the core
+	Rules          map[string]int `json:"rules"`
+	Warnings       []string       `json:"warnings"`
+	Events         []Event        `json:"events"`
+	WebUIURL       string         `json:"webui_url,omitempty"` // full scope only: carries the token
 }
 
-// HelperStatus says whether the privileged helper is reachable.
-type HelperStatus struct {
-	Available bool   `json:"available"`
-	Version   string `json:"version,omitempty"`
-	Error     string `json:"error,omitempty"`
+// VergeStatus is what the daemon knows about Clash Verge and its core.
+type VergeStatus struct {
+	Dir           string     `json:"dir"`
+	App           *verge.App `json:"app,omitempty"` // nil when no installed app was found
+	AppRunning    bool       `json:"app_running"`
+	ConfigError   string     `json:"config_error,omitempty"`
+	Controller    string     `json:"controller"`
+	MihomoVersion string     `json:"mihomo_version,omitempty"` // empty while unreachable
+	MixedPort     int        `json:"mixed_port"`
+	Mode          string     `json:"mode"`  // the core's running mode
+	Modes         []string   `json:"modes"` // what it can be switched to
+	TUN           bool       `json:"tun"`
+	TUNDevice     string     `json:"tun_device"`
+	MergeFile     string     `json:"merge_file"`
+	WebUI         bool       `json:"webui"` // the GUI is in Verge's Settings → Web UI list
 }
 
 func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-	defer cancel()
-	v, _ := d.ctrl.version(ctx)
-	var hs HelperStatus
-	var ping map[string]string
-	if err := helper.Call(ctx, d.o.HelperSocket, "ping", nil, &ping); err != nil {
-		hs.Error = err.Error()
-	} else {
-		hs.Available, hs.Version = true, ping["version"]
-	}
+	appRunning, app, webUI := d.vergeState(r.Context())
+	mergeFile, _ := d.o.Verge.MergeFile()
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -107,27 +105,65 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	for _, s := range d.sources {
 		counts[s.Kind]++
 	}
-	writeJSON(w, Status{
-		Instance: d.inst.Name, Channel: d.o.Channel, Mode: d.mode, Modes: runtimecfg.Modes,
-		MixedPort: d.inst.MixedPort, TUNDevice: d.inst.TUNDevice,
-		CoreVersion: d.o.CoreVersion, MihomoVersion: v, ConfigPath: d.o.ConfigPath, StartedAt: d.startedAt,
-		Helper: hs, Rules: counts, Warnings: d.warnings, Events: slices.Clone(d.events),
-	})
+	st := Status{
+		Channel: d.o.Channel, StartedAt: d.startedAt,
+		Verge: VergeStatus{
+			Dir: string(d.o.Verge), App: app, AppRunning: appRunning, ConfigError: d.runtimeErr,
+			Controller: d.ctrl.endpoint().String(), MihomoVersion: d.mihomoVersion,
+			MixedPort: d.runtime.MixedPort, Mode: firstNonEmpty(d.liveMode, d.runtime.Mode), Modes: Modes, TUN: d.runtime.TUN, TUNDevice: d.runtime.TUNDevice,
+			MergeFile: mergeFile, WebUI: webUI,
+		},
+		HasRules: d.hasUserConfig(), RulesActive: d.rulesActive, PendingRestart: d.pendingRestart,
+		Rules: counts, Warnings: d.warnings, Events: slices.Clone(d.events),
+	}
+	if gui.ScopeFrom(r.Context()) == gui.ScopeFull && d.fullToken != "" {
+		st.WebUIURL = "http://127.0.0.1:" + strconv.Itoa(d.o.GUIPort) + "/?token=" + d.fullToken
+	}
+	writeJSON(w, st)
 }
 
-func (d *Daemon) handleMode(w http.ResponseWriter, r *http.Request) {
+func (d *Daemon) handleVergeRestart(w http.ResponseWriter, r *http.Request) {
+	if gui.ScopeFrom(r.Context()) != gui.ScopeFull {
+		httpError(w, http.StatusForbidden, ErrAgentForbidden.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	defer cancel()
+	if err := d.RestartVerge(ctx); err != nil {
+		httpError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	d.handleStatus(w, r)
+}
+
+// handleVergeMode switches the core's mode (rule, global, direct).
+func (d *Daemon) handleVergeMode(w http.ResponseWriter, r *http.Request) {
+	if gui.ScopeFrom(r.Context()) != gui.ScopeFull {
+		httpError(w, http.StatusForbidden, ErrAgentForbidden.Error())
+		return
+	}
 	var body struct {
 		Mode string `json:"mode"`
 	}
 	if !readJSON(w, r, &body) {
 		return
 	}
-	if !slices.Contains(runtimecfg.Modes, body.Mode) {
-		httpError(w, http.StatusBadRequest, "unknown mode "+strconv.Quote(body.Mode))
+	if err := d.SetMode(r.Context(), body.Mode); err != nil {
+		httpError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	if err := d.SetMode(r.Context(), body.Mode); err != nil {
-		httpError(w, http.StatusConflict, err.Error())
+	d.handleStatus(w, r)
+}
+
+// handleVergeApply pushes the saved rules into the running core again,
+// for when Verge rebuilt its config without them.
+func (d *Daemon) handleVergeApply(w http.ResponseWriter, r *http.Request) {
+	if gui.ScopeFrom(r.Context()) != gui.ScopeFull {
+		httpError(w, http.StatusForbidden, ErrAgentForbidden.Error())
+		return
+	}
+	if err := d.ReloadConfig(r.Context()); err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	d.handleStatus(w, r)
@@ -168,7 +204,14 @@ func (d *Daemon) handleProbe(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &body) {
 		return
 	}
-	res, err := Probe(r.Context(), body.URL, d.inst.MixedPort, d.defaultInterface(r.Context()))
+	d.mu.Lock()
+	port := d.runtime.MixedPort
+	d.mu.Unlock()
+	if port == 0 {
+		httpError(w, http.StatusConflict, "Clash Verge's mixed port is unknown (its runtime config couldn't be read)")
+		return
+	}
+	res, err := Probe(r.Context(), body.URL, port, d.defaultInterface(r.Context()))
 	if err != nil {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
@@ -189,12 +232,13 @@ type RulesView struct {
 	Compiled []CompiledRule        `json:"compiled"`
 	Packs    map[string]rules.Pack `json:"packs"`
 	Types    []string              `json:"types"`
+	Active   bool                  `json:"active"` // the core is running these rules
 }
 
 func (d *Daemon) handleRules(w http.ResponseWriter, r *http.Request) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	v := RulesView{Set: d.ruleSet, Packs: d.ruleSet.AllPacks(), Types: rules.Types}
+	v := RulesView{Set: d.ruleSet, Packs: d.ruleSet.AllPacks(), Types: rules.Types, Active: d.rulesActive}
 	for i, cr := range d.ctrlRules {
 		c := CompiledRule{Position: i + 1, Line: ruleLine(cr)}
 		if i < len(d.sources) {
@@ -216,14 +260,7 @@ func (d *Daemon) handleRuleChange(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &c) {
 		return
 	}
-	d.mu.Lock()
-	next, err := d.ruleSet.Apply(c)
-	d.mu.Unlock()
-	if err != nil {
-		httpError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if err := d.ApplyRules(r.Context(), next); err != nil {
+	if err := d.ApplyChange(r.Context(), c); err != nil {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -293,7 +330,7 @@ func (d *Daemon) handleDecide(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleInterfaces(w http.ResponseWriter, r *http.Request) {
-	ifs, err := Interfaces(r.Context(), netstate.ExecRunner{}, d.inst.TUNDevice)
+	ifs, err := Interfaces(r.Context(), netstate.ExecRunner{}, d.tunDevice())
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return

@@ -25,7 +25,6 @@ The same view, as a diagram, is the Traffic tab in the GUI.
 func cmdTraffic(args []string) error {
 	fs := flag.NewFlagSet("traffic", flag.ExitOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, trafficUsage) }
-	name := instanceFlag(fs)
 	history := fs.Bool("history", false, "show stored history instead of live flows")
 	rng := fs.String("range", "15m", "history window (e.g. 15m, 6h)")
 	q := url.Values{}
@@ -45,7 +44,7 @@ func cmdTraffic(args []string) error {
 		q.Set("mode", "history")
 		q.Set("range", *rng)
 	}
-	api, _, err := apiFor(*name)
+	api, err := apiFor()
 	if err != nil {
 		return err
 	}

@@ -8,13 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nyaaorick/clash-mihomac/internal/instance"
 	"github.com/nyaaorick/clash-mihomac/internal/traffic"
+	"github.com/nyaaorick/clash-mihomac/internal/verge"
 )
 
 func trafficDaemon(t *testing.T, flows []traffic.Flow) *Daemon {
 	t.Helper()
-	d := &Daemon{inst: instance.Instance{Name: "debug", TUNDevice: "utun1991"}}
+	d := &Daemon{runtime: verge.Runtime{TUN: true, TUNDevice: "utun1991"}}
 	d.traffic = &trafficState{
 		store:    traffic.OpenStore(filepath.Join(t.TempDir(), "h.jsonl"), time.Hour),
 		seenOnce: map[string]int{}, addrs: map[string]nodeAddrEntry{},

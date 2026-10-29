@@ -9,7 +9,7 @@
 <body>
   <header class="top">
     <h1>Clash Mihomac</h1>
-    <span id="instance" class="muted"></span>
+    <span id="instance" class="muted">companion for Clash Verge Rev</span>
     <span id="state" class="pill">loading…</span>
     <nav>
       <button data-tab="overview" class="active">Overview</button>
@@ -24,14 +24,23 @@
   <main>
     <section id="tab-overview">
       <div class="card">
-        <h2>Mode</h2>
-        <div id="modes" class="segmented"></div>
-        <p id="mode-help" class="muted"></p>
-        <p id="mode-error" class="error" hidden></p>
-      </div>
-      <div class="card">
-        <h2>Status</h2>
+        <h2>Clash Verge</h2>
+        <p id="verge-help" class="muted"></p>
+        <p id="mode-warning" class="error" hidden></p>
+        <div class="toolbar"><span class="muted small">Mode</span><div id="modes" class="segmented"></div></div>
+        <p class="muted small">Rules apply only in <strong>rule</strong> mode. Switching here changes the running core at once; Clash Verge keeps its own setting, so set it there as well for it to survive a Clash Verge restart.</p>
         <dl id="status"></dl>
+        <div class="actions">
+          <button id="verge-apply" type="button" hidden>Load rules into mihomo now</button>
+          <button id="verge-restart" type="button" hidden>Restart Clash Verge</button>
+        </div>
+        <p id="verge-error" class="error" hidden></p>
+        <details id="webui-howto">
+          <summary>Open this page from inside Clash Verge</summary>
+          <p class="muted small">In Clash Verge go to <strong>Settings → Web UI</strong> and add this address; it then opens from Verge's list. Your browser is already logged in (for a year), so the address needs no token:</p>
+          <p><code id="webui-url" class="mono"></code></p>
+          <p class="muted small"><code>mihomac up</code> adds it on its own whenever it starts Clash Verge; <code>mihomac webui --install</code> does the same while Clash Verge is closed.</p>
+        </details>
       </div>
       <div class="card" id="warnings-card" hidden>
         <h2>Config warnings</h2>
@@ -62,6 +71,7 @@
     </section>
 
     <section id="tab-rules" hidden>
+      <p id="rules-mode-warning" class="error" hidden></p>
       <div class="card" id="proposals-card" hidden>
         <h2>Pending proposals</h2>
         <div id="proposals"></div>
@@ -141,7 +151,7 @@
       </div>
       <div class="card">
         <h2>Import nodes</h2>
-        <p class="muted small">From share links (vless://, vmess://, trojan://, ss://, hysteria2://), a subscription, or a QR code image. Imported nodes are kept apart from your config file.</p>
+        <p class="muted small">From share links (vless://, vmess://, trojan://, ss://, hysteria2://), a subscription, or a QR code image. Imported nodes are added to Clash Verge through its global Merge profile, so they are available in every profile.</p>
         <form id="import-form" class="pack-form">
           <textarea id="import-text" rows="4" class="mono" placeholder="Paste share links or a subscription here"></textarea>
           <label class="muted small">…or a QR code image: <input id="import-image" type="file" accept="image/png,image/jpeg"></label>
@@ -264,20 +274,9 @@
         </details>
       </div>
       <div class="card">
-        <h2>Instances and profiles</h2>
-        <p class="muted small">Each runs side by side with its own ports, directory, TUN device, and mihomo version. Manage them with <code>mihomac profile</code> and <code>mihomac core</code>.</p>
-        <div class="table-wrap">
-          <table id="instance-table">
-            <thead><tr><th>Name</th><th>Status</th><th>Mode</th><th>Core</th><th>Proxy port</th><th>TUN</th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </div>
-      <div class="card">
         <h2>Logs</h2>
         <div class="toolbar">
-          <select id="log-instance"></select>
-          <select id="log-source"><option value="daemon">daemon</option><option value="core">mihomo core</option></select>
+          <select id="log-source"><option value="daemon">Clash Mihomac</option><option value="verge">Clash Verge</option></select>
           <button id="log-refresh" type="button">Refresh</button>
         </div>
         <pre id="log-output" class="mono log"></pre>

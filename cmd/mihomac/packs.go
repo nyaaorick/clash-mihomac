@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
 
 	"github.com/nyaaorick/clash-mihomac/internal/client"
 	"github.com/nyaaorick/clash-mihomac/internal/daemon"
-	"github.com/nyaaorick/clash-mihomac/internal/instance"
 	"github.com/nyaaorick/clash-mihomac/internal/rules"
 )
 
@@ -46,7 +46,6 @@ func cmdPacks(args []string) error {
 	}
 	fs := flag.NewFlagSet("packs "+sub, flag.ExitOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, packsUsage) }
-	name := instanceFlag(fs)
 	mapping := mapFlag{}
 	fs.Var(mapping, "map", "map a pack placeholder to a target, NAME=TARGET (repeatable)")
 	enable := fs.Bool("enable", false, "also enable the pack")
@@ -61,11 +60,11 @@ func cmdPacks(args []string) error {
 		pos = append(pos, fs.Arg(0))
 		rest = fs.Args()[1:]
 	}
-	_, inst, err := resolve(*name)
+	home, err := resolve()
 	if err != nil {
 		return err
 	}
-	set, err := currentRuleSet(inst)
+	set, err := currentRuleSet(home)
 	if err != nil {
 		return err
 	}
@@ -160,14 +159,14 @@ func cmdPacks(args []string) error {
 	if err != nil {
 		return err
 	}
-	if !*yes || running(inst) { // an offline apply prints the diff itself
+	if !*yes || running(home) { // an offline apply prints the diff itself
 		fmt.Print(diff)
 	}
 	if !*yes {
 		fmt.Println("\nThis is a preview; nothing has changed. Re-run with --yes to apply.")
 		return nil
 	}
-	return changeRules(inst, change)
+	return changeRules(home, change)
 }
 
 func installedPack(set rules.Set, name string) (rules.Pack, bool) {
@@ -233,13 +232,13 @@ func readPackSource(src string) (data []byte, source string, err error) {
 	return data, "", err
 }
 
-// currentRuleSet is the instance's rule set: the live one if it is
-// running, else the saved file.
-func currentRuleSet(inst instance.Instance) (rules.Set, error) {
-	if !running(inst) {
-		return rules.Load(inst.Path("rules.yaml"))
+// currentRuleSet is the rule set: the live one if the daemon is running,
+// else the saved file.
+func currentRuleSet(home string) (rules.Set, error) {
+	if !running(home) {
+		return rules.Load(filepath.Join(home, "rules.yaml"))
 	}
-	api, err := client.ForInstance(inst, client.TokenFull)
+	api, err := client.Connect(home, client.TokenFull)
 	if err != nil {
 		return rules.Set{}, err
 	}

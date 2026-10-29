@@ -152,7 +152,7 @@ func describeSource(s rules.Source) string {
 	case "pack":
 		return "the " + s.Name + " rule pack"
 	case "config":
-		return fmt.Sprintf("rule #%d in your mihomo config file", s.Index)
+		return fmt.Sprintf("rule #%d from your Clash Verge profile", s.Index)
 	}
 	return "an unknown source"
 }

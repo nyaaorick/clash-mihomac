@@ -24,11 +24,10 @@ type API interface {
 	Post(ctx context.Context, path string, body, out any) error
 }
 
-// Server serves MCP for one instance.
+// Server serves MCP for the running daemon.
 type Server struct {
-	API      API
-	Instance string
-	Version  string
+	API     API
+	Version string
 }
 
 var protocolVersions = []string{"2025-06-18", "2025-03-26", "2024-11-05"}
@@ -274,8 +273,8 @@ func (s *Server) call(ctx context.Context, name string, raw json.RawMessage) (st
 		if err = s.API.Post(ctx, "/api/proposals", map[string]any{"summary": str("summary"), "change": change}, &p); err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("Proposal %s recorded (dry run, nothing changed yet):\n\n%s\nThe user must apply it in the Clash Mihomac GUI (Rules tab) or run:\n  mihomac proposals apply %s --instance %s",
-			p.ID, p.Diff, p.ID, s.Instance), nil
+		return fmt.Sprintf("Proposal %s recorded (dry run, nothing changed yet):\n\n%s\nThe user must apply it in the Clash Mihomac GUI (Rules tab) or run:\n  mihomac proposals apply %s",
+			p.ID, p.Diff, p.ID), nil
 	case "list_proposals":
 		err = s.API.Get(ctx, "/api/proposals", &out)
 	default:

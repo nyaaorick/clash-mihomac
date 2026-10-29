@@ -51,7 +51,7 @@ function describeSource(s) {
     case "user": return `your rule ${s.name}${note}`;
     case "bypass": return `built-in bypass${note}`;
     case "pack": return `${s.name} pack`;
-    case "config": return `config file #${s.index}`;
+    case "config": return `Clash Verge profile #${s.index}`;
   }
   return s.kind;
 }
@@ -70,12 +70,6 @@ for (const b of document.querySelectorAll("nav button")) {
 
 // ---- overview --------------------------------------------------------------
 
-const modeHelp = {
-  "tun": "Captures every app, including CLI tools that ignore proxy settings. Needs the privileged helper.",
-  "system-proxy": "Sets the macOS system proxy. Apps that honor it are proxied; nothing else changes. Needs the privileged helper.",
-  "port-only": "Only the mixed port at 127.0.0.1. Nothing on the system changes; point apps at it yourself.",
-};
-
 async function loadStatus() {
   const state = $("#state");
   let s;
@@ -86,27 +80,47 @@ async function loadStatus() {
     state.className = "pill bad";
     return;
   }
-  $("#instance").textContent = `${s.instance} · ${s.channel} build`;
-  state.textContent = s.mihomo_version ? `${s.mode} · running` : "core unreachable";
-  state.className = "pill " + (s.mihomo_version ? "ok" : "bad");
+  const v = s.verge;
+  const core = !!v.mihomo_version;
+  state.textContent = core ? `mihomo ${v.mihomo_version} · ${v.mode}` : v.app_running ? "mihomo unreachable" : "Clash Verge not running";
+  state.className = "pill " + (core ? "ok" : "bad");
 
-  const needsHelper = (m) => m !== "port-only" && !s.helper.available;
-  $("#modes").replaceChildren(...s.modes.map((m) => el("button", {
-    class: m === s.mode ? "active" : "",
-    disabled: needsHelper(m) ? "" : null,
-    title: needsHelper(m) ? "Install the privileged helper first" : modeHelp[m],
-    onclick: () => switchMode(m),
-  }, m)));
-  $("#mode-help").textContent = modeHelp[s.mode] +
-    (s.helper.available ? "" : " The privileged helper isn't installed, so only port-only mode is available (sudo make install-helper).");
+  let help;
+  if (v.config_error) help = `Clash Verge's config couldn't be read: ${v.config_error}`;
+  else if (!v.app_running) help = "Clash Verge is not running. Start it; this page reconnects on its own.";
+  else if (!core) help = "Clash Verge is running but its mihomo core isn't answering yet.";
+  else if (s.has_rules && !s.rules_active) help = "The running core doesn't have your rules at the front of its list (Clash Verge rebuilt its config, or a script profile replaced the rules).";
+  else help = "Clash Verge runs mihomo, TUN, and the system proxy. Clash Mihomac watches that core and adds its rules through Verge's global Merge profile.";
+  $("#verge-help").textContent = help;
+
+  const modeWarning = core && v.mode !== "rule"
+    ? `Clash Verge is in ${v.mode} mode: your rules are not used for routing${v.mode === "global" ? " (everything goes through the selected node)" : v.mode === "direct" ? " (nothing goes through a proxy)" : ""}. Switch to rule mode to use them.`
+    : "";
+  for (const id of ["#mode-warning", "#rules-mode-warning"]) { $(id).textContent = modeWarning; $(id).hidden = !modeWarning; }
+  // Build the mode buttons once and update them in place, so a click
+  // isn't lost to the two-second refresh re-creating them.
+  const modes = $("#modes");
+  if (modes.children.length !== (v.modes || []).length) {
+    modes.replaceChildren(...(v.modes || []).map((m) => el("button", { "data-mode": m, onclick: () => setMode(m) }, m)));
+  }
+  for (const b of modes.children) {
+    b.classList.toggle("active", b.dataset.mode === v.mode);
+    b.disabled = !core;
+  }
+  $("#verge-apply").hidden = !(core && s.has_rules && !s.rules_active);
+  $("#verge-restart").hidden = !(s.pending_restart && v.app_running);
+  $("#webui-url").textContent = location.origin + "/";
 
   const rows = [
-    ["Proxy", `http / socks5 127.0.0.1:${s.mixed_port}`],
-    ["TUN device", s.mode === "tun" ? s.tun_device : `${s.tun_device} (off)`],
-    ["Core", `mihomo ${s.core_version}` + (s.mihomo_version ? ` (reports ${s.mihomo_version})` : "")],
-    ["Helper", s.helper.available ? `available (${s.helper.version})` : "not available"],
-    ["Rules", Object.entries(s.rules || {}).map(([k, v]) => `${v} ${k}`).join(", ")],
-    ["Config", s.config_path],
+    ["App", v.app ? `Clash Verge ${v.app.version} at ${v.app.path}` + (v.app.service ? "" : " · system service not installed (TUN needs it)") : "not installed: run `mihomac up` to install it"],
+    ["Core", core ? `mihomo ${v.mihomo_version} via ${v.controller}` : "unreachable"],
+    ["Proxy", v.mixed_port ? `http / socks5 127.0.0.1:${v.mixed_port}` : "–"],
+    ["TUN", v.tun ? `on (${v.tun_device})` : "off: only traffic that reaches the proxy port is seen"],
+    ["Rules", Object.entries(s.rules || {}).map(([k, v]) => `${v} ${k}`).join(", ") || "–"],
+    ["Rules in core", !s.has_rules ? "none of your own yet (add one on the Rules tab)" : s.rules_active ? "active" : s.pending_restart ? "waiting for Clash Verge to restart" : "not active"],
+    ["In Clash Verge", v.webui ? "yes: Settings → Web UI opens this page" : "not yet: quit Clash Verge and run `mihomac up` (or `mihomac webui --install`)"],
+    ["Merge profile", v.merge_file],
+    ["Verge data", v.dir],
     ["Started", new Date(s.started_at).toLocaleString()],
   ];
   $("#status").replaceChildren(...rows.flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]));
@@ -117,17 +131,31 @@ async function loadStatus() {
     el("li", {}, el("time", {}, fmtTime(e.time)), e.message)));
 }
 
-async function switchMode(mode) {
-  const errNode = $("#mode-error");
+async function vergeAction(path, busy) {
+  const errNode = $("#verge-error");
   showError(errNode, null);
-  $("#state").textContent = `switching to ${mode}…`;
+  $("#state").textContent = busy;
   try {
-    await api("/api/mode", { mode });
+    await api(path, {});
   } catch (e) {
     showError(errNode, e);
   }
   loadStatus();
 }
+async function setMode(mode) {
+  const errNode = $("#verge-error");
+  showError(errNode, null);
+  try {
+    await api("/api/verge/mode", { mode });
+  } catch (e) {
+    showError(errNode, e);
+  }
+  loadStatus();
+}
+$("#verge-apply").addEventListener("click", () => vergeAction("/api/verge/apply", "loading rules…"));
+$("#verge-restart").addEventListener("click", () => {
+  if (confirm("Quit and relaunch Clash Verge? Connections drop for a few seconds.")) vergeAction("/api/verge/restart", "restarting Clash Verge…");
+});
 
 // ---- connections -----------------------------------------------------------
 
@@ -416,23 +444,8 @@ $("#group-apply").addEventListener("click", async () => {
   if (groupChange && await applyGroupChange(groupChange)) { groupChange = null; $("#group-preview").hidden = true; $("#group-form").reset(); }
 });
 
-async function loadInstances() {
-  let list;
-  try { list = await api("/api/instances"); } catch { return; }
-  $("#instance-table tbody").replaceChildren(...list.map((i) => el("tr", { class: i.current ? "active" : "" },
-    el("td", {}, i.name, i.label !== i.name ? ` (${i.label})` : "", i.current ? " · this one" : ""),
-    el("td", {}, i.running ? `running (pid ${i.pid})` : "stopped"), el("td", {}, i.mode || "–"),
-    el("td", { class: "mono" }, i.core_version), el("td", { class: "mono" }, i.mixed_port), el("td", { class: "mono" }, i.tun_device))));
-  const sel = $("#log-instance");
-  if (sel.options.length !== list.length) {
-    const keep = sel.value;
-    sel.replaceChildren(...list.map((i) => el("option", { value: i.name }, i.name)));
-    sel.value = keep || (list.find((i) => i.current) || list[0]).name;
-  }
-}
-
 async function loadLog() {
-  const q = new URLSearchParams({ instance: $("#log-instance").value, source: $("#log-source").value, lines: "200" });
+  const q = new URLSearchParams({ source: $("#log-source").value, lines: "200" });
   try {
     const r = await api("/api/logs?" + q);
     $("#log-output").textContent = r.lines.length ? r.lines.join("\n") : "(empty)";
@@ -441,7 +454,6 @@ async function loadLog() {
   }
 }
 $("#log-refresh").addEventListener("click", loadLog);
-$("#log-instance").addEventListener("change", loadLog);
 $("#log-source").addEventListener("change", loadLog);
 
 $("#probe-form").addEventListener("submit", (e) => {
@@ -696,7 +708,7 @@ $("#tr-clear").addEventListener("click", () => {
   loadTraffic();
 });
 $("#tr-forget").addEventListener("click", async () => {
-  if (!confirm("Delete all stored traffic history for this instance?")) return;
+  if (!confirm("Delete all stored traffic history?")) return;
   try { await api("/api/traffic/clear", {}); } catch (e) { alert(e.message); }
   loadTraffic();
 });
@@ -786,7 +798,7 @@ async function loadTraffic() {
   warn.textContent = (v.warnings || []).join(" · ");
   $("#tr-summary").textContent = `${v.flows} flow${v.flows === 1 ? "" : "s"}` +
     (v.mode === "live" ? ", updated " + fmtTime(v.updated) : "") +
-    (v.tun ? ` · TUN ${v.tun}` : " · not in TUN mode: only traffic that reaches the proxy port is attributed to rules");
+    (v.tun ? ` · TUN ${v.tun}` : " · Clash Verge's TUN is off: only traffic that reaches the proxy port is attributed to rules");
 
   $("#tr-anomalies-card").hidden = !v.anomalies.length;
   $("#tr-anomalies").replaceChildren(...v.anomalies.map((a) => el("li", {}, el("strong", {}, ANOMALY_TITLE[a.kind] || a.kind), `: ${a.process} → ${a.remote}. ${a.detail}`)));
@@ -864,7 +876,7 @@ function refresh() {
   loadProposals();
   if (currentTab === "connections") { loadConnections(); if (selectedConn) loadDetail(); }
   if (currentTab === "rules") { loadRules(); loadTargets(); updateValueHints(); }
-  if (currentTab === "network") { loadNetwork(); loadInstances(); }
+  if (currentTab === "network") { loadNetwork(); loadLog(); }
   if (currentTab === "traffic") loadTraffic();
   if (currentTab === "servers") loadMachines();
 }

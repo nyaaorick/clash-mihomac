@@ -1,4 +1,4 @@
-// Package client calls a running instance's localhost API. The CLI uses
+// Package client calls the running daemon's localhost API. The CLI uses
 // the full token; the MCP server uses the agent token.
 package client
 
@@ -6,14 +6,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/nyaaorick/clash-mihomac/internal/instance"
 )
 
 // Token files, by scope.
@@ -22,21 +22,38 @@ const (
 	TokenAgent = "mcp-token"
 )
 
-// Client talks to one instance.
+// Client talks to the daemon.
 type Client struct {
 	Base  string
 	Token string
 	HTTP  *http.Client
 }
 
-// ForInstance returns a client for inst using the named token file.
-func ForInstance(inst instance.Instance, tokenFile string) (*Client, error) {
-	data, err := os.ReadFile(inst.Path(tokenFile))
+// ErrNotRunning means the daemon's state file is missing.
+var ErrNotRunning = errors.New("Clash Mihomac is not running (start it with `mihomac start`)")
+
+// Connect returns a client for the daemon whose data lives under home,
+// using the named token file.
+func Connect(home, tokenFile string) (*Client, error) {
+	st, err := os.ReadFile(filepath.Join(home, "state.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, ErrNotRunning
+	}
 	if err != nil {
-		return nil, fmt.Errorf("read %s token (is %s running?): %w", tokenFile, inst.Name, err)
+		return nil, err
+	}
+	var state struct {
+		GUIURL string `json:"gui_url"`
+	}
+	if err := json.Unmarshal(st, &state); err != nil || state.GUIURL == "" {
+		return nil, fmt.Errorf("state file is unreadable; stop and start Clash Mihomac")
+	}
+	data, err := os.ReadFile(filepath.Join(home, tokenFile))
+	if err != nil {
+		return nil, fmt.Errorf("read %s token: %w", tokenFile, err)
 	}
 	return &Client{
-		Base:  fmt.Sprintf("http://127.0.0.1:%d", inst.GUIPort),
+		Base:  strings.TrimSuffix(state.GUIURL, "/"),
 		Token: strings.TrimSpace(string(data)),
 		HTTP:  &http.Client{Timeout: 90 * time.Second},
 	}, nil
@@ -72,7 +89,7 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return fmt.Errorf("%s %s: %w (is the instance running?)", method, path, err)
+		return fmt.Errorf("%s %s: %w (is Clash Mihomac running?)", method, path, err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))

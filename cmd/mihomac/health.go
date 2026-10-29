@@ -27,7 +27,6 @@ handshake failure) from an ordinary outage. Only a failing node triggers those e
 func cmdHealth(args []string) error {
 	fs := flag.NewFlagSet("health", flag.ExitOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, healthUsage) }
-	name := instanceFlag(fs)
 	var pos []string
 	for rest := args; len(rest) > 0; {
 		fs.Parse(rest)
@@ -37,7 +36,7 @@ func cmdHealth(args []string) error {
 		pos = append(pos, fs.Arg(0))
 		rest = fs.Args()[1:]
 	}
-	api, _, err := apiFor(*name)
+	api, err := apiFor()
 	if err != nil {
 		return err
 	}
@@ -88,7 +87,7 @@ func cmdHealth(args []string) error {
 	}
 
 	if len(view.Nodes) == 0 {
-		fmt.Println("No health checks yet; the first round runs shortly after the instance starts (or run `mihomac health check`).")
+		fmt.Println("No health checks yet; the first round runs shortly after Clash Mihomac starts (or run `mihomac health check`).")
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -143,7 +142,6 @@ func cmdGroups(args []string) error {
 	}
 	fs := flag.NewFlagSet("groups "+sub, flag.ExitOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, groupsUsage) }
-	name := instanceFlag(fs)
 	typ := fs.String("type", "", "fallback, url-test, or load-balance")
 	members := fs.String("members", "", "comma-separated nodes or groups from your config")
 	checkURL := fs.String("url", "", "health-check URL")
@@ -162,11 +160,11 @@ func cmdGroups(args []string) error {
 		pos = append(pos, fs.Arg(0))
 		rest = fs.Args()[1:]
 	}
-	_, inst, err := resolve(*name)
+	home, err := resolve()
 	if err != nil {
 		return err
 	}
-	set, err := currentRuleSet(inst)
+	set, err := currentRuleSet(home)
 	if err != nil {
 		return err
 	}
@@ -210,12 +208,12 @@ func cmdGroups(args []string) error {
 	if err != nil {
 		return err
 	}
-	if !*yes || running(inst) {
+	if !*yes || running(home) {
 		fmt.Print(diff)
 	}
 	if !*yes {
 		fmt.Println("\nThis is a preview; nothing has changed. Re-run with --yes to apply.")
 		return nil
 	}
-	return changeRules(inst, change)
+	return changeRules(home, change)
 }

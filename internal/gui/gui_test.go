@@ -131,3 +131,17 @@ func TestLoadOrCreateToken(t *testing.T) {
 		t.Errorf("token not reused: %q vs %q, %v", a, b, err)
 	}
 }
+
+func TestUnauthenticatedBrowserGetsLoginPage(t *testing.T) {
+	h := Handler("127.0.0.1:9991", Tokens{Full: strings.Repeat("f", 32)}, http.NotFoundHandler())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:9991/", nil))
+	if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), "launch.command") || strings.Contains(rec.Body.String(), strings.Repeat("f", 32)) {
+		t.Errorf("page: %d %q", rec.Code, rec.Body.String()[:min(80, rec.Body.Len())])
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:9991/api/status", nil))
+	if rec.Code != http.StatusUnauthorized || strings.Contains(rec.Body.String(), "<html") {
+		t.Errorf("api must stay plain: %d", rec.Code)
+	}
+}

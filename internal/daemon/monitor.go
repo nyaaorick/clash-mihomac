@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"os"
 	"sort"
 	"sync"
 	"time"
@@ -24,7 +23,7 @@ const (
 
 // ctrlDelayer measures latency through a node with mihomo's delay test.
 type ctrlDelayer struct {
-	c   controller
+	c   *controller
 	url string
 }
 
@@ -103,26 +102,41 @@ func (d *Daemon) checkNodes(ctx context.Context, only string) []string {
 	return names
 }
 
-// nodeTargets lists every proxy node to check: those in the user's config
-// and those imported from share links or managed servers.
+// nodeTargets lists every proxy node to check: those in the Clash Verge
+// profile that is running and those imported from share links or managed
+// servers. A node that appears in both (Verge has applied the imported
+// list) is checked once.
 func (d *Daemon) nodeTargets() ([]health.Target, error) {
-	targets, err := d.userTargets()
+	targets, err := d.profileTargets()
 	if err != nil {
 		return nil, err
 	}
-	if nodes, err := vps.LoadNodes(d.inst.Path("nodes.yaml")); err == nil {
-		targets = append(targets, health.TargetsFromProxies(vps.Proxies(nodes))...)
+	seen := map[string]bool{}
+	for _, t := range targets {
+		seen[t.Name] = true
+	}
+	if nodes, err := vps.LoadNodes(d.path("nodes.yaml")); err == nil {
+		for _, t := range health.TargetsFromProxies(vps.Proxies(nodes)) {
+			if !seen[t.Name] {
+				seen[t.Name] = true
+				targets = append(targets, t)
+			}
+		}
 	}
 	return targets, nil
 }
 
-// userTargets lists the proxy nodes in the user's own config file.
-func (d *Daemon) userTargets() ([]health.Target, error) {
-	cfg, err := os.ReadFile(d.o.ConfigPath)
-	if err != nil {
-		return nil, err
+// profileTargets lists the proxy nodes in Clash Verge's running config.
+// Its runtime config is the only file that has every node with its
+// server and port, after subscriptions, merges, and scripts.
+func (d *Daemon) profileTargets() ([]health.Target, error) {
+	d.mu.Lock()
+	raw := d.runtime.Raw
+	d.mu.Unlock()
+	if raw == nil {
+		return nil, nil
 	}
-	return health.TargetsFromConfig(cfg)
+	return health.TargetsFromConfig(raw)
 }
 
 func filterTargets(ts []health.Target, name string) []health.Target {

@@ -125,9 +125,12 @@ func guard(addr string, tok Tokens, next http.Handler) http.Handler {
 				http.Error(w, "invalid token", http.StatusUnauthorized)
 				return
 			}
+			// The cookie outlives the browser session so the plain address
+			// (the one Clash Verge's Web UI list opens) keeps working after
+			// one login with the token.
 			http.SetCookie(w, &http.Cookie{
 				Name: cookieName, Value: tok.Full, Path: "/",
-				HttpOnly: true, SameSite: http.SameSiteStrictMode,
+				HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: 365 * 24 * 3600,
 			})
 			http.Redirect(w, r, "/", http.StatusSeeOther)
 			return
@@ -135,6 +138,14 @@ func guard(addr string, tok Tokens, next http.Handler) http.Handler {
 
 		scope := scopeOf(r, tok, cookieName)
 		if scope == "" {
+			if r.Method == http.MethodGet && !strings.HasPrefix(r.URL.Path, "/api/") {
+				// A browser that hasn't logged in yet, e.g. one opened from
+				// Clash Verge's Web UI list: explain how, instead of a bare 401.
+				h.Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusUnauthorized)
+				w.Write([]byte(loginPage))
+				return
+			}
 			http.Error(w, "unauthorized: open the URL printed by `mihomac status`", http.StatusUnauthorized)
 			return
 		}
@@ -173,3 +184,24 @@ func scopeOf(r *http.Request, tok Tokens, cookieName string) string {
 func equal(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
+
+// loginPage is shown to a browser without the login cookie. It holds no
+// secret: logging in takes the token address that only the local user can
+// print.
+const loginPage = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clash Mihomac</title>
+<style>
+:root { color-scheme: light dark; }
+body { font: 15px/1.5 -apple-system, system-ui, sans-serif; max-width: 34rem; margin: 4rem auto; padding: 0 1rem; }
+code { font: 13px ui-monospace, Menlo, monospace; background: rgba(127,127,127,.15); padding: .1rem .3rem; border-radius: 4px; }
+</style></head><body>
+<h1>Clash Mihomac</h1>
+<p>This browser isn't logged in yet. Do one of these on this Mac, once:</p>
+<ul>
+<li>Double-click <code>launch.command</code> in the Clash Mihomac folder. It opens this page logged in.</li>
+<li>Or run <code>bin/mihomac webui</code> and open the address it prints.</li>
+</ul>
+<p>After that, this address (and Clash Verge's Settings → Web UI entry) opens the dashboard directly in this browser for a year.</p>
+</body></html>
+`

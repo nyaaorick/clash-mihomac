@@ -8,22 +8,109 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	neturl "net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/nyaaorick/clash-mihomac/internal/verge"
 )
 
-// controller talks to mihomo's external controller.
+// controller talks to mihomo's external controller, over the Unix socket
+// Verge configures by default or over TCP when that is what Verge has.
+// The endpoint can change while the daemon runs (Verge regenerates its
+// config on every apply), so it is swapped under a lock.
 type controller struct {
-	addr   string
-	secret string
+	mu     sync.Mutex
+	ep     verge.Endpoint
+	client *http.Client // short requests
+	stream *http.Client // the log stream: no timeout
 }
 
-var ctrlClient = &http.Client{Timeout: 5 * time.Second}
+// newController returns a controller for ep.
+func newController(ep verge.Endpoint) *controller {
+	c := &controller{}
+	c.set(ep)
+	return c
+}
 
-func (c controller) do(ctx context.Context, method, path string, body, out any) error {
+// set switches the controller to ep.
+func (c *controller) set(ep verge.Endpoint) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ep == ep && c.client != nil {
+		return
+	}
+	if c.client != nil {
+		if old, ok := c.client.Transport.(*http.Transport); ok {
+			old.CloseIdleConnections()
+		}
+	}
+	c.ep = ep
+	tr := &http.Transport{Proxy: nil, IdleConnTimeout: 30 * time.Second}
+	if ep.Network == "unix" {
+		path := ep.Address
+		tr.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", path)
+		}
+	}
+	c.client = &http.Client{Timeout: 5 * time.Second, Transport: tr}
+	c.stream = &http.Client{Transport: tr}
+}
+
+// snapshot returns the endpoint with the clients built for it, taken
+// under one lock so a swap can't pair one endpoint's URL with another's
+// transport.
+func (c *controller) snapshot() (verge.Endpoint, *http.Client, *http.Client) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ep, c.client, c.stream
+}
+
+// endpoint returns the current endpoint.
+func (c *controller) endpoint() verge.Endpoint {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ep
+}
+
+// ready reports whether an endpoint is configured.
+func (c *controller) ready() bool { return c.endpoint().Network != "" }
+
+func urlFor(ep verge.Endpoint, path string) string {
+	if ep.Network == "unix" {
+		return "http://mihomo" + path
+	}
+	return "http://" + ep.Address + path
+}
+
+// newRequest builds a request for the current endpoint and returns the
+// clients that go with it.
+func (c *controller) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, *http.Client, *http.Client, error) {
+	ep, client, stream := c.snapshot()
+	if ep.Network == "" {
+		return nil, nil, nil, errors.New("mihomo controller not configured")
+	}
+	req, err := http.NewRequestWithContext(ctx, method, urlFor(ep, path), body)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+ep.Secret)
+	return req, client, stream, nil
+}
+
+// do sends a short request. slow uses the client without a timeout, for
+// calls that legitimately take a while (a full config reload); the
+// caller's context bounds those.
+func (c *controller) do(ctx context.Context, method, path string, body, out any) error {
+	return c.doWith(ctx, false, method, path, body, out)
+}
+
+func (c *controller) doWith(ctx context.Context, slow bool, method, path string, body, out any) error {
 	var r io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -32,19 +119,21 @@ func (c controller) do(ctx context.Context, method, path string, body, out any) 
 		}
 		r = bytes.NewReader(data)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, "http://"+c.addr+path, r)
+	req, client, stream, err := c.newRequest(ctx, method, path, r)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.secret)
-	resp, err := ctrlClient.Do(req)
+	if slow {
+		client = stream
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("controller %s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(string(msg)))
+		return &ctrlHTTPError{Method: method, Path: path, Status: resp.StatusCode, Msg: firstNonEmpty(strings.TrimSpace(string(msg)), resp.Status)}
 	}
 	if out != nil {
 		return json.NewDecoder(resp.Body).Decode(out)
@@ -52,7 +141,18 @@ func (c controller) do(ctx context.Context, method, path string, body, out any) 
 	return nil
 }
 
-func (c controller) version(ctx context.Context) (string, error) {
+// ctrlHTTPError is a reply mihomo gave, as opposed to not being reachable.
+type ctrlHTTPError struct {
+	Method, Path string
+	Status       int
+	Msg          string
+}
+
+func (e *ctrlHTTPError) Error() string {
+	return fmt.Sprintf("controller %s %s: %d: %s", e.Method, e.Path, e.Status, e.Msg)
+}
+
+func (c *controller) version(ctx context.Context) (string, error) {
 	var body struct {
 		Version string `json:"version"`
 	}
@@ -85,7 +185,7 @@ type ctrlConn struct {
 	RulePayload string    `json:"rulePayload"`
 }
 
-func (c controller) connections(ctx context.Context) ([]ctrlConn, error) {
+func (c *controller) connections(ctx context.Context) ([]ctrlConn, error) {
 	var body struct {
 		Connections []ctrlConn `json:"connections"`
 	}
@@ -101,7 +201,7 @@ type ctrlRule struct {
 	Proxy   string `json:"proxy"`
 }
 
-func (c controller) rules(ctx context.Context) ([]ctrlRule, error) {
+func (c *controller) rules(ctx context.Context) ([]ctrlRule, error) {
 	var body struct {
 		Rules []ctrlRule `json:"rules"`
 	}
@@ -122,7 +222,7 @@ type ctrlProxy struct {
 	} `json:"history"`
 }
 
-func (c controller) proxies(ctx context.Context) (map[string]ctrlProxy, error) {
+func (c *controller) proxies(ctx context.Context) (map[string]ctrlProxy, error) {
 	var body struct {
 		Proxies map[string]ctrlProxy `json:"proxies"`
 	}
@@ -131,18 +231,18 @@ func (c controller) proxies(ctx context.Context) (map[string]ctrlProxy, error) {
 }
 
 // delay runs mihomo's own delay test through one proxy.
-func (c controller) delay(ctx context.Context, proxy, url string, timeout time.Duration) (time.Duration, error) {
+func (c *controller) delay(ctx context.Context, proxy, url string, timeout time.Duration) (time.Duration, error) {
 	q := neturl.Values{"url": {url}, "timeout": {strconv.Itoa(int(timeout / time.Millisecond))}}
 	var body struct {
 		Delay int `json:"delay"`
 	}
 	// The controller's own client times out at 5s; give the test its full timeout.
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+c.addr+"/proxies/"+neturl.PathEscape(proxy)+"/delay?"+q.Encode(), nil)
+	req, short, _, err := c.newRequest(ctx, http.MethodGet, "/proxies/"+neturl.PathEscape(proxy)+"/delay?"+q.Encode(), nil)
 	if err != nil {
 		return 0, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.secret)
-	resp, err := (&http.Client{Timeout: timeout + 3*time.Second}).Do(req)
+	client := &http.Client{Timeout: timeout + 3*time.Second, Transport: short.Transport}
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -157,20 +257,35 @@ func (c controller) delay(ctx context.Context, proxy, url string, timeout time.D
 	return time.Duration(body.Delay) * time.Millisecond, nil
 }
 
-// reload makes mihomo re-read its config file.
-func (c controller) reload(ctx context.Context, path string) error {
-	return c.do(ctx, http.MethodPut, "/configs?force=true", map[string]string{"path": path}, nil)
+// mode reads the core's running mode (rule, global, direct).
+func (c *controller) mode(ctx context.Context) (string, error) {
+	var body struct {
+		Mode string `json:"mode"`
+	}
+	err := c.do(ctx, http.MethodGet, "/configs", nil, &body)
+	return body.Mode, err
+}
+
+// setMode switches the core's mode in place.
+func (c *controller) setMode(ctx context.Context, mode string) error {
+	return c.do(ctx, http.MethodPatch, "/configs", map[string]string{"mode": mode}, nil)
+}
+
+// reloadPayload hands mihomo a whole new config to switch to in place.
+// Nothing on disk changes: this is how Clash Mihomac's rules reach the
+// running core right away, ahead of Verge's next apply.
+func (c *controller) reloadPayload(ctx context.Context, cfg []byte) error {
+	return c.doWith(ctx, true, http.MethodPut, "/configs?force=true", map[string]string{"payload": string(cfg)}, nil)
 }
 
 // streamLogs calls fn for each log line until ctx is cancelled or the
 // stream ends.
-func (c controller) streamLogs(ctx context.Context, level string, fn func(level, payload string)) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+c.addr+"/logs?level="+level, nil)
+func (c *controller) streamLogs(ctx context.Context, level string, fn func(level, payload string)) error {
+	req, _, stream, err := c.newRequest(ctx, http.MethodGet, "/logs?level="+level, nil)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.secret)
-	resp, err := http.DefaultClient.Do(req) // no timeout: this stream is long-lived
+	resp, err := stream.Do(req)
 	if err != nil {
 		return err
 	}
@@ -192,22 +307,7 @@ func (c controller) streamLogs(ctx context.Context, level string, fn func(level,
 	return sc.Err()
 }
 
-func (c controller) waitReady(ctx context.Context, exited <-chan struct{}, timeout time.Duration) error {
-	deadline := time.After(timeout)
-	tick := time.NewTicker(200 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		if _, err := c.version(ctx); err == nil {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-exited:
-			return errors.New("mihomo exited during startup")
-		case <-deadline:
-			return errors.New("mihomo controller not ready in time")
-		case <-tick.C:
-		}
-	}
+// tcpController is a test helper: a controller for a plain host:port.
+func tcpController(addr, secret string) *controller {
+	return newController(verge.Endpoint{Network: "tcp", Address: addr, Secret: secret})
 }

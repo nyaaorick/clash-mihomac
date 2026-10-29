@@ -19,52 +19,29 @@ import (
 	"github.com/nyaaorick/clash-mihomac/internal/buildinfo"
 	"github.com/nyaaorick/clash-mihomac/internal/client"
 	"github.com/nyaaorick/clash-mihomac/internal/daemon"
-	"github.com/nyaaorick/clash-mihomac/internal/instance"
 	"github.com/nyaaorick/clash-mihomac/internal/mcp"
 	"github.com/nyaaorick/clash-mihomac/internal/rules"
 )
 
-// apiFor returns a full-scope client for a running instance.
-func apiFor(name string) (*client.Client, instance.Instance, error) {
-	_, inst, err := resolve(name)
+// apiFor returns a full-scope client for the running daemon.
+func apiFor() (*client.Client, error) {
+	home, err := resolve()
 	if err != nil {
-		return nil, inst, err
+		return nil, err
 	}
-	if !running(inst) {
-		return nil, inst, fmt.Errorf("%s is not running", inst.Name)
+	if !running(home) {
+		return nil, client.ErrNotRunning
 	}
-	c, err := client.ForInstance(inst, client.TokenFull)
-	return c, inst, err
+	return client.Connect(home, client.TokenFull)
 }
 
-func running(inst instance.Instance) bool {
-	st, ok, _ := daemon.ReadState(inst)
+func running(home string) bool {
+	st, ok, _ := daemon.ReadState(home)
 	return ok && daemon.IsRunning(st)
 }
 
 func apiCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 90*time.Second)
-}
-
-func cmdMode(args []string) error {
-	fs := flag.NewFlagSet("mode", flag.ExitOnError)
-	name := instanceFlag(fs)
-	fs.Parse(args)
-	if fs.NArg() != 1 {
-		return errors.New("usage: mihomac mode <tun|system-proxy|port-only>")
-	}
-	api, _, err := apiFor(*name)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := apiCtx()
-	defer cancel()
-	var st daemon.Status
-	if err := api.Post(ctx, "/api/mode", map[string]string{"mode": fs.Arg(0)}, &st); err != nil {
-		return err
-	}
-	fmt.Printf("%s is now in %s mode.\n", st.Instance, st.Mode)
-	return nil
 }
 
 const rulesUsage = `Usage:
@@ -77,7 +54,8 @@ const rulesUsage = `Usage:
 Types: domain, domain-suffix, domain-keyword, ip-cidr, process-name, process-path, app
 Targets: DIRECT, REJECT, a proxy or group from your config, or iface:<name> (e.g. iface:en1)
 
-Changes apply immediately to a running instance, or are saved for the next start.
+Changes are written to Clash Verge's global Merge profile and hot-loaded into its
+running core; while the daemon is stopped they are saved and applied at the next start.
 `
 
 func cmdRules(args []string) error {
@@ -87,7 +65,6 @@ func cmdRules(args []string) error {
 	}
 	fs := flag.NewFlagSet("rules "+sub, flag.ExitOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, rulesUsage) }
-	name := instanceFlag(fs)
 	typ := fs.String("type", "", "rule type")
 	value := fs.String("value", "", "rule value")
 	target := fs.String("target", "", "rule target")
@@ -96,21 +73,21 @@ func cmdRules(args []string) error {
 	disable := fs.String("disable", "", "pack to disable")
 	fs.Parse(args)
 
-	_, inst, err := resolve(*name)
+	home, err := resolve()
 	if err != nil {
 		return err
 	}
 	var change rules.Change
 	switch sub {
 	case "list":
-		return listRules(inst)
+		return listRules(home)
 	case "add":
 		change.Add = []rules.Rule{{Type: *typ, Value: *value, Target: *target, Note: *note}}
 	case "remove":
 		change.Remove = []rules.Rule{{Type: *typ, Value: *value, Target: *target}}
 	case "packs":
 		if *enable == "" && *disable == "" {
-			set, _ := rules.Load(inst.Path("rules.yaml"))
+			set, _ := rules.Load(filepath.Join(home, "rules.yaml"))
 			all := set.AllPacks()
 			for _, p := range set.PackNames() {
 				mark := " "
@@ -141,23 +118,23 @@ func cmdRules(args []string) error {
 		fmt.Fprint(os.Stderr, rulesUsage)
 		return fmt.Errorf("unknown rules command %q", sub)
 	}
-	return changeRules(inst, change)
+	return changeRules(home, change)
 }
 
-func listRules(inst instance.Instance) error {
-	if !running(inst) {
-		set, err := rules.Load(inst.Path("rules.yaml"))
+func listRules(home string) error {
+	if !running(home) {
+		set, err := rules.Load(filepath.Join(home, "rules.yaml"))
 		if err != nil {
 			return err
 		}
-		fmt.Printf("%s is not running; your rules (applied on start, ahead of the built-in bypass):\n", inst.Name)
+		fmt.Println("Clash Mihomac is not running; your rules (applied on start, ahead of the built-in bypass):")
 		for i, r := range set.Rules {
 			fmt.Printf("  #%d  %s  %s\n", i+1, rules.Describe(r), r.Note)
 		}
 		fmt.Printf("Packs: %v\n", set.Packs)
 		return nil
 	}
-	api, err := client.ForInstance(inst, client.TokenFull)
+	api, err := client.Connect(home, client.TokenFull)
 	if err != nil {
 		return err
 	}
@@ -166,6 +143,17 @@ func listRules(inst instance.Instance) error {
 	var v daemon.RulesView
 	if err := api.Get(ctx, "/api/rules", &v); err != nil {
 		return err
+	}
+	if len(v.Compiled) == 0 {
+		fmt.Println("Clash Verge's core isn't reachable, so the final rule list is unknown. Your rules (ahead of the built-in bypass once applied):")
+		for i, r := range v.Set.Rules {
+			fmt.Printf("  #%d  %s  %s\n", i+1, rules.Describe(r), r.Note)
+		}
+		fmt.Printf("Packs: %v\n", v.Set.Packs)
+		return nil
+	}
+	if !v.Active && len(v.Set.Rules) > 0 {
+		fmt.Println("Note: the running core does not have your rules at the front of its list; see `mihomac status`.")
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "#\tRULE\tSOURCE")
@@ -177,7 +165,7 @@ func listRules(inst instance.Instance) error {
 		case "pack":
 			src = "pack " + r.Source.Name
 		case "config":
-			src = fmt.Sprintf("config #%d", r.Source.Index)
+			src = fmt.Sprintf("Verge profile #%d", r.Source.Index)
 		}
 		if r.Source.Note != "" {
 			src += " (" + r.Source.Note + ")"
@@ -187,21 +175,26 @@ func listRules(inst instance.Instance) error {
 	return w.Flush()
 }
 
-func changeRules(inst instance.Instance, change rules.Change) error {
-	if running(inst) {
-		api, err := client.ForInstance(inst, client.TokenFull)
+func changeRules(home string, change rules.Change) error {
+	if running(home) {
+		api, err := client.Connect(home, client.TokenFull)
 		if err != nil {
 			return err
 		}
 		ctx, cancel := apiCtx()
 		defer cancel()
-		if err := api.Post(ctx, "/api/rules/change", change, nil); err != nil {
+		var v daemon.RulesView
+		if err := api.Post(ctx, "/api/rules/change", change, &v); err != nil {
 			return err
 		}
-		fmt.Println("Applied to the running instance.")
+		if v.Active {
+			fmt.Println("Applied: written to Clash Verge's merge profile and loaded into the running core.")
+		} else {
+			fmt.Println("Saved to Clash Verge's merge profile; it applies when Clash Verge (re)starts. `mihomac status` shows why the core didn't take it now.")
+		}
 		return nil
 	}
-	path := inst.Path("rules.yaml")
+	path := filepath.Join(home, "rules.yaml")
 	set, err := rules.Load(path)
 	if err != nil {
 		return err
@@ -215,7 +208,7 @@ func changeRules(inst instance.Instance, change rules.Change) error {
 		return err
 	}
 	fmt.Print(diff)
-	fmt.Printf("Saved to %s; applied when %s starts.\n", path, inst.Name)
+	fmt.Printf("Saved to %s; applied when Clash Mihomac starts.\n", path)
 	return nil
 }
 
@@ -248,9 +241,8 @@ func cmdProposals(args []string) error {
 		sub, args = args[0], args[1:]
 	}
 	fs := flag.NewFlagSet("proposals "+sub, flag.ExitOnError)
-	name := instanceFlag(fs)
 	fs.Parse(args)
-	api, _, err := apiFor(*name)
+	api, err := apiFor()
 	if err != nil {
 		return err
 	}
@@ -289,11 +281,10 @@ func cmdProposals(args []string) error {
 
 func cmdConnections(args []string) error {
 	fs := flag.NewFlagSet("connections", flag.ExitOnError)
-	name := instanceFlag(fs)
 	q := fs.String("q", "", "filter by host, IP, app, rule, or node")
 	n := fs.Int("n", 30, "how many to show")
 	fs.Parse(args)
-	api, _, err := apiFor(*name)
+	api, err := apiFor()
 	if err != nil {
 		return err
 	}
@@ -324,12 +315,11 @@ func cmdConnections(args []string) error {
 
 func cmdDiagnose(args []string) error {
 	fs := flag.NewFlagSet("diagnose", flag.ExitOnError)
-	name := instanceFlag(fs)
 	fs.Parse(args)
 	if fs.NArg() != 1 {
 		return errors.New("usage: mihomac diagnose <connection ID or ID prefix>")
 	}
-	api, _, err := apiFor(*name)
+	api, err := apiFor()
 	if err != nil {
 		return err
 	}
@@ -385,12 +375,11 @@ func cmdDiagnose(args []string) error {
 
 func cmdProbe(args []string) error {
 	fs := flag.NewFlagSet("probe", flag.ExitOnError)
-	name := instanceFlag(fs)
 	fs.Parse(args)
 	if fs.NArg() != 1 {
 		return errors.New("usage: mihomac probe <http(s) URL>")
 	}
-	api, _, err := apiFor(*name)
+	api, err := apiFor()
 	if err != nil {
 		return err
 	}
@@ -416,9 +405,8 @@ func cmdProbe(args []string) error {
 
 func cmdInterfaces(args []string) error {
 	fs := flag.NewFlagSet("interfaces", flag.ExitOnError)
-	name := instanceFlag(fs)
 	fs.Parse(args)
-	api, _, err := apiFor(*name)
+	api, err := apiFor()
 	if err != nil {
 		return err
 	}
@@ -438,27 +426,63 @@ func cmdInterfaces(args []string) error {
 
 func cmdMCP(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
-	name := instanceFlag(fs)
 	setup := fs.Bool("setup", false, "print setup instructions for Claude, Cursor, and other MCP clients, then exit")
 	fs.Parse(args)
-	_, inst, err := resolve(*name)
-	if err != nil {
-		return err
-	}
 	if *setup {
 		exe, err := os.Executable()
 		if err != nil {
 			return err
 		}
-		fmt.Print(mcp.SetupInstructions(exe, inst.Name))
+		fmt.Print(mcp.SetupInstructions(exe))
 		return nil
 	}
-	api, err := client.ForInstance(inst, client.TokenAgent)
+	home, err := resolve()
 	if err != nil {
 		return err
 	}
-	s := &mcp.Server{API: api, Instance: inst.Name, Version: buildinfo.Version}
+	api, err := client.Connect(home, client.TokenAgent)
+	if err != nil {
+		return err
+	}
+	s := &mcp.Server{API: api, Version: buildinfo.Version}
 	return s.Serve(context.Background(), os.Stdin, os.Stdout)
+}
+
+// cmdLogs prints the daemon's log or Clash Verge's.
+func cmdLogs(args []string) error {
+	fs := flag.NewFlagSet("logs", flag.ExitOnError)
+	source := fs.String("source", "daemon", "daemon or verge")
+	lines := fs.Int("n", 100, "number of lines")
+	vdir := vergeDirFlag(fs)
+	fs.Parse(args)
+	home, err := resolve()
+	if err != nil {
+		return err
+	}
+	var path string
+	switch *source {
+	case "daemon":
+		path = filepath.Join(home, daemon.DaemonLog)
+	case "verge":
+		vd, err := locateVerge(*vdir)
+		if err != nil {
+			return err
+		}
+		path = vd.LogFile()
+	default:
+		return fmt.Errorf("unknown log %q (want daemon or verge)", *source)
+	}
+	out, err := daemon.ReadLog(path, *lines)
+	if err != nil {
+		return err
+	}
+	if len(out) == 0 {
+		fmt.Printf("No %s log yet (%s).\n", *source, path)
+	}
+	for _, l := range out {
+		fmt.Println(l)
+	}
+	return nil
 }
 
 func printJSON(v any) error {

@@ -56,7 +56,7 @@ func Interfaces(ctx context.Context, r netstate.Runner, ownDevice string) ([]Ifa
 		}
 		switch {
 		case ifi.Name == ownDevice:
-			it.Role = "Clash Mihomac TUN (this instance)"
+			it.Role = "Clash Verge TUN"
 		case it.Default:
 			it.Role = "default route"
 		case tunnel:

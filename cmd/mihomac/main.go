@@ -1,4 +1,5 @@
-// Command mihomac controls Clash Mihomac instances.
+// Command mihomac runs and controls Clash Mihomac, the companion to Clash
+// Verge Rev.
 package main
 
 import (
@@ -10,29 +11,29 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
-	"runtime"
-	"slices"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/nyaaorick/clash-mihomac/internal/buildinfo"
-	"github.com/nyaaorick/clash-mihomac/internal/core"
 	"github.com/nyaaorick/clash-mihomac/internal/daemon"
-	"github.com/nyaaorick/clash-mihomac/internal/helper"
-	"github.com/nyaaorick/clash-mihomac/internal/instance"
-	"github.com/nyaaorick/clash-mihomac/internal/runtimecfg"
+	"github.com/nyaaorick/clash-mihomac/internal/paths"
+	"github.com/nyaaorick/clash-mihomac/internal/verge"
 )
 
 const usageText = `Usage: mihomac <command> [flags]
 
+Clash Mihomac works alongside Clash Verge Rev: Verge runs mihomo, TUN, and
+the system proxy; Clash Mihomac watches that core and adds diagnostics,
+rules, server management, and an MCP server.
+
 Running:
-  start             Start an instance (--mode tun | system-proxy | port-only)
-  stop              Stop an instance and restore the network
-  status            Show an instance's status and GUI URL
-  mode <mode>       Switch a running instance's mode
-  restore-network   Stop every instance and restore routes, DNS, and proxy settings
+  up                One click: install Clash Verge if missing, start it, start the daemon, open the GUI
+  start             Start the companion daemon and print the GUI address
+  stop              Stop the daemon (Clash Verge keeps running)
+  status            Show whether the daemon and Clash Verge's core are up
+  verge             Clash Verge itself: status, install, open, restart (verge -h)
+  webui             Print the GUI address; --install adds it to Clash Verge's Web UI list
 
 Routing:
   rules             List rules; add, remove, or toggle packs (rules -h)
@@ -50,11 +51,9 @@ Diagnostics:
   health            Node health, blocking detection, and history (health -h)
 
 Other:
+  island            Run as the island4mac plugin (the daemon in-process, the tab on stdin/stdout)
   mcp               Run the MCP server on stdio (mcp --setup prints client setup)
-  profile           Add, list, or remove side-by-side profiles (profile -h)
-  core              Manage mihomo versions: install, list, use, rollback, remove
-  logs              Show an instance's daemon or core log
-  helper <cmd>      Talk to the privileged helper: ping, status, snapshot
+  logs              Show the daemon's log, or Clash Verge's (--source verge)
   version           Print the Clash Mihomac version
 
 Run "mihomac <command> -h" for a command's flags.
@@ -67,13 +66,12 @@ func main() {
 	}
 	cmd, args := os.Args[1], os.Args[2:]
 	commands := map[string]func([]string) error{
-		"start": cmdStart, "stop": cmdStop, "status": cmdStatus, "mode": cmdMode,
-		"restore-network": cmdRestoreNetwork,
-		"rules":           cmdRules, "proposals": cmdProposals,
+		"up": cmdUp, "start": cmdStart, "stop": cmdStop, "status": cmdStatus, "webui": cmdWebUI, "verge": cmdVerge,
+		"rules": cmdRules, "proposals": cmdProposals,
 		"connections": cmdConnections, "diagnose": cmdDiagnose, "probe": cmdProbe, "interfaces": cmdInterfaces,
-		"mcp": cmdMCP, "core": cmdCore, "helper": cmdHelper, "profile": cmdProfile, "packs": cmdPacks, "health": cmdHealth, "vps": cmdVPS, "traffic": cmdTraffic, "groups": cmdGroups, "logs": cmdLogs,
-		"run":       cmdRun,      // internal: the daemon process started by `start`
-		"core-exec": cmdCoreExec, // internal: wrapper that ties mihomo to the daemon
+		"mcp": cmdMCP, "packs": cmdPacks, "health": cmdHealth, "vps": cmdVPS, "traffic": cmdTraffic, "groups": cmdGroups, "logs": cmdLogs,
+		"run":    cmdRun,    // internal: the daemon process started by `start`
+		"island": cmdIsland, // the island4mac plugin: the daemon in-process, the tab over the plugin protocol
 	}
 	var err error
 	switch {
@@ -93,109 +91,56 @@ func main() {
 	}
 }
 
-func instanceFlag(fs *flag.FlagSet) *string {
-	return fs.String("instance", buildinfo.Channel, "instance to use ("+strings.Join(instance.Names(), ", ")+")")
+// resolve returns Clash Mihomac's data directory.
+func resolve() (string, error) {
+	return paths.Home()
 }
 
-func helperSocketFlag(fs *flag.FlagSet) *string {
-	def := helper.DefaultSocket
-	if s := os.Getenv("MIHOMAC_HELPER_SOCKET"); s != "" {
-		def = s
-	}
-	return fs.String("helper-socket", def, "privileged helper socket (env MIHOMAC_HELPER_SOCKET)")
+func vergeDirFlag(fs *flag.FlagSet) *string {
+	return fs.String("verge-dir", "", "Clash Verge Rev's data directory (default: its standard location, or MIHOMAC_VERGE_DIR)")
 }
 
-func resolve(name string) (string, instance.Instance, error) {
-	home, err := instance.Home()
-	if err != nil {
-		return "", instance.Instance{}, err
+func locateVerge(flagValue string) (verge.Dir, error) {
+	if flagValue != "" {
+		os.Setenv("MIHOMAC_VERGE_DIR", flagValue)
 	}
-	inst, err := instance.Get(home, name)
-	return home, inst, err
+	return verge.Locate()
 }
 
 func cmdStart(args []string) error {
 	fs := flag.NewFlagSet("start", flag.ExitOnError)
-	name := instanceFlag(fs)
-	config := fs.String("config", "", "mihomo config file (default <instance dir>/config.yaml)")
-	coreVersion := fs.String("core", "", "mihomo core version (default: the instance's selected version, see `mihomac core use`)")
-	mode := fs.String("mode", "", "tun, system-proxy, or port-only (default: tun for stable, port-only for debug)")
-	routeAddr := fs.String("route-address", "", "comma-separated CIDRs: only capture these in TUN mode (for testing)")
-	socket := helperSocketFlag(fs)
+	port := fs.Int("gui-port", paths.GUIPort(), "port for the GUI and API on 127.0.0.1")
+	vdir := vergeDirFlag(fs)
 	fs.Parse(args)
 
-	home, inst, err := resolve(*name)
+	home, err := resolve()
 	if err != nil {
 		return err
 	}
-	if *coreVersion == "" {
-		*coreVersion = core.Selected(inst.Dir, core.DefaultVersion)
+	vd, err := locateVerge(*vdir)
+	if err != nil {
+		return err
 	}
-	if *mode == "" {
-		*mode = runtimecfg.ModePortOnly
-		if inst.TUNDefault {
-			*mode = runtimecfg.ModeTUN
-		}
-	}
-	if !slices.Contains(runtimecfg.Modes, *mode) {
-		return fmt.Errorf("unknown mode %q (want one of %v)", *mode, runtimecfg.Modes)
-	}
-	if st, ok, err := daemon.ReadState(inst); err != nil {
+	return startDaemon(home, vd, *port)
+}
+
+// startDaemon launches the daemon process and waits for its state file.
+func startDaemon(home string, vd verge.Dir, port int) error {
+	if st, ok, err := daemon.ReadState(home); err != nil {
 		return err
 	} else if ok {
 		if daemon.IsRunning(st) {
-			return fmt.Errorf("instance %s is already running (pid %d)", inst.Name, st.PID)
+			return fmt.Errorf("Clash Mihomac is already running (pid %d)", st.PID)
 		}
 		// A previous daemon died without cleaning up; clear what it left.
-		if _, err := daemon.Stop(inst, 5*time.Second); err != nil {
+		if _, err := daemon.Stop(home, 5*time.Second); err != nil {
 			return err
 		}
 	}
-	if *mode != runtimecfg.ModePortOnly {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err := helper.Call(ctx, *socket, "ping", nil, nil)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("%s mode needs the privileged helper: %w\nInstall it with `sudo make install-helper`, or start with --mode port-only", *mode, err)
-		}
-	}
-
-	cfgPath := *config
-	if cfgPath == "" {
-		cfgPath = inst.Path("config.yaml")
-	}
-	cfgPath, err = filepath.Abs(cfgPath)
-	if err != nil {
+	if err := os.MkdirAll(home, 0o700); err != nil {
 		return err
 	}
-	user, err := os.ReadFile(cfgPath)
-	if errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("config %s not found; pass --config or copy examples/config.example.yaml there", cfgPath)
-	} else if err != nil {
-		return err
-	}
-	res, err := runtimecfg.Build(user, runtimecfg.Options{
-		MixedPort: inst.MixedPort, ControllerPort: inst.ControllerPort, Mode: *mode, TUNDevice: inst.TUNDevice, TUNAddress: inst.TUNAddress,
-	})
-	if err != nil {
-		return err
-	}
-	for _, w := range res.Warnings {
-		fmt.Println("warning:", w)
-	}
-
-	mgr := core.NewManager(home)
-	if !mgr.IsInstalled(*coreVersion) {
-		fmt.Printf("Installing mihomo %s…\n", *coreVersion)
-		if _, err := mgr.Install(context.Background(), *coreVersion, runtime.GOARCH, ""); err != nil {
-			return err
-		}
-	}
-
-	if err := os.MkdirAll(inst.Dir, 0o700); err != nil {
-		return err
-	}
-	logPath := inst.Path("daemon.log")
+	logPath := home + "/" + daemon.DaemonLog
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -204,11 +149,7 @@ func cmdStart(args []string) error {
 	if err != nil {
 		return err
 	}
-	runArgs := []string{"run", "--instance", inst.Name, "--config", cfgPath, "--core", *coreVersion, "--mode", *mode, "--helper-socket", *socket}
-	if *routeAddr != "" {
-		runArgs = append(runArgs, "--route-address", *routeAddr)
-	}
-	cmd := exec.Command(exe, runArgs...)
+	cmd := exec.Command(exe, "run", "--gui-port", fmt.Sprint(port), "--verge-dir", string(vd))
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	err = cmd.Start()
@@ -219,10 +160,10 @@ func cmdStart(args []string) error {
 
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
-	deadline := time.After(45 * time.Second)
+	deadline := time.After(30 * time.Second)
 	for {
-		if st, ok, _ := daemon.ReadState(inst); ok && st.PID == cmd.Process.Pid {
-			printRunning(inst, st)
+		if st, ok, _ := daemon.ReadState(home); ok && st.PID == cmd.Process.Pid {
+			printRunning(home, st)
 			return nil
 		}
 		select {
@@ -238,185 +179,178 @@ func cmdStart(args []string) error {
 
 func cmdRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	name := instanceFlag(fs)
-	config := fs.String("config", "", "mihomo config file")
-	coreVersion := fs.String("core", core.DefaultVersion, "mihomo core version")
-	mode := fs.String("mode", runtimecfg.ModePortOnly, "mode")
-	routeAddr := fs.String("route-address", "", "comma-separated CIDRs to capture in TUN mode")
-	socket := helperSocketFlag(fs)
+	port := fs.Int("gui-port", paths.GUIPort(), "GUI port")
+	vdir := vergeDirFlag(fs)
 	fs.Parse(args)
 
-	home, inst, err := resolve(*name)
+	home, err := resolve()
 	if err != nil {
 		return err
 	}
-	exe, err := os.Executable()
+	vd, err := locateVerge(*vdir)
 	if err != nil {
 		return err
-	}
-	var routes []string
-	if *routeAddr != "" {
-		routes = strings.Split(*routeAddr, ",")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	return daemon.Run(ctx, daemon.Options{
-		Instance:     inst,
-		Channel:      buildinfo.Channel,
-		CorePath:     core.NewManager(home).BinaryPath(*coreVersion),
-		CoreVersion:  *coreVersion,
-		ConfigPath:   *config,
-		Mode:         *mode,
-		RouteAddress: routes,
-		HelperSocket: *socket,
-		Exe:          exe,
-		Log:          log.New(os.Stderr, "", log.LstdFlags),
+		Home:    home,
+		Verge:   vd,
+		GUIPort: *port,
+		Channel: buildinfo.Channel,
+		Log:     log.New(os.Stderr, "", log.LstdFlags),
 	})
 }
 
-func cmdCoreExec(args []string) error {
-	if len(args) < 1 {
-		return errors.New("usage: mihomac core-exec <core> [args...]")
-	}
-	return daemon.Supervise(args[0], args[1:])
-}
-
 func cmdStop(args []string) error {
-	fs := flag.NewFlagSet("stop", flag.ExitOnError)
-	name := instanceFlag(fs)
-	fs.Parse(args)
-
-	_, inst, err := resolve(*name)
+	home, err := resolve()
 	if err != nil {
 		return err
 	}
-	stopped, err := daemon.Stop(inst, 40*time.Second)
+	stopped, err := daemon.Stop(home, 20*time.Second)
 	if err != nil {
 		return err
 	}
 	if stopped {
-		fmt.Printf("Stopped %s.\n", inst.Name)
+		fmt.Println("Stopped Clash Mihomac. Clash Verge and its core are untouched.")
 	} else {
-		fmt.Printf("%s is not running.\n", inst.Name)
+		fmt.Println("Clash Mihomac is not running.")
 	}
 	return nil
 }
 
 func cmdStatus(args []string) error {
-	fs := flag.NewFlagSet("status", flag.ExitOnError)
-	name := instanceFlag(fs)
-	fs.Parse(args)
-
-	_, inst, err := resolve(*name)
+	home, err := resolve()
 	if err != nil {
 		return err
 	}
-	st, ok, err := daemon.ReadState(inst)
+	st, ok, err := daemon.ReadState(home)
 	if err != nil {
 		return err
 	}
 	switch {
 	case !ok:
-		fmt.Printf("%s is not running.\n", inst.Name)
+		fmt.Println("Clash Mihomac is not running.")
 	case !daemon.IsRunning(st):
-		fmt.Printf("%s is not running (stale state from pid %d; `mihomac stop --instance %s` cleans it up).\n", inst.Name, st.PID, inst.Name)
+		fmt.Printf("Clash Mihomac is not running (stale state from pid %d; `mihomac stop` cleans it up).\n", st.PID)
 	default:
-		printRunning(inst, st)
+		printRunning(home, st)
+		api, err := apiFor()
+		if err != nil {
+			return err
+		}
+		ctx, cancel := apiCtx()
+		defer cancel()
+		var s daemon.Status
+		if err := api.Get(ctx, "/api/status", &s); err != nil {
+			return err
+		}
+		v := s.Verge
+		core := "unreachable"
+		if v.MihomoVersion != "" {
+			core = fmt.Sprintf("mihomo %s via %s, mode %s, mixed port %d", v.MihomoVersion, v.Controller, v.Mode, v.MixedPort)
+		}
+		tun := "off"
+		if v.TUN {
+			tun = "on (" + v.TUNDevice + ")"
+		}
+		app := "not running"
+		if v.AppRunning {
+			app = "running"
+		}
+		rulesState := "not active in the core"
+		switch {
+		case !s.HasRules:
+			rulesState = "none of your own yet (add one with `mihomac rules add`)"
+		case s.RulesActive:
+			rulesState = "active in the core"
+		case s.PendingRestart:
+			rulesState = "saved; waiting for Clash Verge to restart"
+		}
+		fmt.Printf("  Clash Verge  %s\n  Core         %s\n  TUN          %s\n  Rules        %s\n", app, core, tun, rulesState)
+		if v.ConfigError != "" {
+			fmt.Printf("  Problem      %s\n", v.ConfigError)
+		}
+		for _, w := range s.Warnings {
+			fmt.Println("  warning:", w)
+		}
 	}
 	return nil
 }
 
-func cmdRestoreNetwork(args []string) error {
-	fs := flag.NewFlagSet("restore-network", flag.ExitOnError)
-	socket := helperSocketFlag(fs)
+func cmdWebUI(args []string) error {
+	fs := flag.NewFlagSet("webui", flag.ExitOnError)
+	install := fs.Bool("install", false, "add the address to Clash Verge's Web UI list (Clash Verge must be closed)")
+	vdir := vergeDirFlag(fs)
 	fs.Parse(args)
 
-	home, err := instance.Home()
+	home, err := resolve()
 	if err != nil {
 		return err
 	}
-	insts, err := instance.List(home)
+	url, err := guiURL(home)
 	if err != nil {
 		return err
 	}
-	for _, inst := range insts {
-		stopped, err := daemon.Stop(inst, 40*time.Second)
-		if err != nil {
-			return fmt.Errorf("stop %s: %w", inst.Name, err)
-		}
-		if stopped {
-			fmt.Printf("Stopped %s.\n", inst.Name)
-		}
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	var res helper.RestoreResult
-	if err := helper.Call(ctx, *socket, "restore-network", nil, &res); err != nil {
-		fmt.Printf("The privileged helper isn't reachable (%v).\nWithout it Clash Mihomac can only run in port-only mode, which never changes routes, DNS, or proxy settings.\n", err)
+	// The address stored in Verge's settings carries no token: that file
+	// is Verge's and world-readable. Opening the token URL once logs the
+	// browser in for a year, after which the plain address works.
+	plain := strings.SplitN(url, "?", 2)[0]
+	if !*install {
+		fmt.Println(url)
+		fmt.Printf("\nOpen that once to log in; afterwards %s works on its own.\nAdd the plain address in Clash Verge under Settings → Web UI, or run `mihomac webui --install` while Clash Verge is closed.\n", plain)
 		return nil
 	}
-	for _, ev := range res.Ended {
-		fmt.Printf("[%s] %s\n", ev.Instance, ev.Message)
+	url = plain
+	vd, err := locateVerge(*vdir)
+	if err != nil {
+		return err
 	}
-	switch {
-	case res.Network == nil:
-		fmt.Println("Network settings already match their pre-Clash-Mihomac state.")
-	case res.Network.OK():
-		for _, a := range res.Network.Actions {
-			fmt.Println("  " + a)
-		}
-		fmt.Println("Network settings restored and verified.")
-	default:
-		for _, r := range res.Network.Remaining {
-			fmt.Println("  still different: " + r)
-		}
-		return errors.New("network not fully restored; see above")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if verge.Running(ctx, execRunner{}) {
+		return errors.New("quit Clash Verge first: it rewrites its settings file while running, so an entry added now would be lost")
+	}
+	changed, err := vd.AddWebUI(url)
+	if err != nil {
+		return err
+	}
+	if changed {
+		fmt.Printf("Added %s to Clash Verge's Web UI list. Open the GUI once with `mihomac status` (that logs the browser in), then it opens from Clash Verge's Settings → Web UI.\n", url)
+	} else {
+		fmt.Println("Already in Clash Verge's Web UI list.")
 	}
 	return nil
 }
 
-func cmdHelper(args []string) error {
-	if len(args) == 0 {
-		return errors.New("usage: mihomac helper <ping|status|snapshot>")
+// guiURL is the dashboard address with the login token, from the running
+// daemon's state or, when it isn't running, the default port.
+func guiURL(home string) (string, error) {
+	tok, err := os.ReadFile(home + "/gui-token")
+	if err != nil {
+		return "", errors.New("no GUI token yet; run `mihomac start` once")
 	}
-	fs := flag.NewFlagSet("helper", flag.ExitOnError)
-	socket := helperSocketFlag(fs)
-	fs.Parse(args[1:])
-
-	cmds := map[string]string{"ping": "ping", "status": "status", "snapshot": "network-snapshot"}
-	cmd, ok := cmds[args[0]]
-	if !ok {
-		return fmt.Errorf("unknown helper command %q", args[0])
+	base := fmt.Sprintf("http://127.0.0.1:%d/", paths.GUIPort())
+	if st, ok, _ := daemon.ReadState(home); ok && daemon.IsRunning(st) {
+		base = st.GUIURL
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	var res any
-	if err := helper.Call(ctx, *socket, cmd, nil, &res); err != nil {
-		return err
-	}
-	return printJSON(res)
+	return base + "?token=" + strings.TrimSpace(string(tok)), nil
 }
 
-func printRunning(inst instance.Instance, st daemon.State) {
-	url := st.GUIURL
-	if tok, err := os.ReadFile(inst.Path("gui-token")); err == nil {
-		url += "?token=" + strings.TrimSpace(string(tok))
-	}
-	modeDesc := map[string]string{
-		runtimecfg.ModeTUN:         "TUN: traffic captured on " + inst.TUNDevice,
-		runtimecfg.ModeSystemProxy: fmt.Sprintf("system proxy: apps that honor it use 127.0.0.1:%d", st.MixedPort),
-		runtimecfg.ModePortOnly:    "port-only: routes, DNS, and proxy settings untouched",
-	}[st.Mode]
-	fmt.Printf(`%s is running (pid %d)
-  Mode    %s
-  Proxy   http/socks5 127.0.0.1:%d
-  Core    mihomo %s
-  Config  %s
-  GUI     %s
+type execRunner struct{}
 
-Try it:   curl -x http://127.0.0.1:%d -I https://example.com
-`, inst.Name, st.PID, modeDesc, st.MixedPort, st.CoreVersion, st.ConfigPath, url, st.MixedPort)
+func (execRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
+	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	return string(out), err
+}
+
+func printRunning(home string, st daemon.State) {
+	url, _ := guiURL(home)
+	fmt.Printf(`Clash Mihomac is running (pid %d)
+  Clash Verge  %s
+  Data         %s
+  GUI          %s
+`, st.PID, st.VergeDir, home, url)
 }
 
 func tail(path string, n int) string {

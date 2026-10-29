@@ -1,74 +1,86 @@
-// Package daemon runs one Clash Mihomac instance: it starts mihomo in the
-// requested mode, keeps its config in sync with the user's rules, tracks
-// connections for diagnostics, and serves the localhost GUI and API.
+// Package daemon runs Clash Mihomac as a companion to Clash Verge Rev. It
+// doesn't start a proxy core of its own: Clash Verge owns mihomo, TUN, and
+// the system proxy. The daemon finds Verge's mihomo through the files
+// Verge writes, watches its connections for diagnostics and the traffic
+// view, checks node health, manages servers over SSH, and serves the
+// localhost GUI, API, and MCP server.
 //
-// In port-only and system-proxy mode mihomo runs as the user, wrapped by
-// `mihomac core-exec` so it dies with the daemon. In TUN mode the
-// privileged helper runs it as root and ends the session if the daemon
-// exits for any reason.
+// Rules the user adds here reach mihomo two ways at once: they are written
+// into Clash Verge's global Merge profile, which Verge folds into every
+// config it generates, and they are hot-loaded into the running core so
+// they take effect without a restart. Verge is never told to re-apply (it
+// has no way to be told); the Merge file simply takes over the next time
+// Verge rebuilds its config.
 package daemon
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
+	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
-	"sync/atomic"
-	"syscall"
 	"time"
+
+	"go.yaml.in/yaml/v3"
 
 	"github.com/nyaaorick/clash-mihomac/internal/gui"
 	"github.com/nyaaorick/clash-mihomac/internal/health"
-	"github.com/nyaaorick/clash-mihomac/internal/helper"
-	"github.com/nyaaorick/clash-mihomac/internal/instance"
 	"github.com/nyaaorick/clash-mihomac/internal/netstate"
 	"github.com/nyaaorick/clash-mihomac/internal/rules"
-	"github.com/nyaaorick/clash-mihomac/internal/runtimecfg"
+	"github.com/nyaaorick/clash-mihomac/internal/verge"
 	"github.com/nyaaorick/clash-mihomac/internal/vps"
 )
 
 // Options configure a daemon run.
 type Options struct {
-	Instance     instance.Instance
-	Channel      string
-	CorePath     string
-	CoreVersion  string
-	ConfigPath   string
-	Mode         string
-	RouteAddress []string // limit TUN capture (testing)
-	HelperSocket string
-	Exe          string // this mihomac binary, for the core-exec wrapper
-	Log          *log.Logger
+	Home    string    // Clash Mihomac's data directory
+	Verge   verge.Dir // Clash Verge Rev's data directory
+	GUIPort int
+	Channel string
+	Runner  netstate.Runner // for restarting Verge; nil runs real commands
+	Log     *log.Logger
 }
 
-// Daemon is a running instance.
+// Daemon is the running companion.
 type Daemon struct {
 	o         Options
-	inst      instance.Instance
-	ctrl      controller
+	home      string
+	ctrl      *controller
 	tracker   *Tracker
 	proposals *Proposals
 	health    *health.History
 	traffic   *trafficState
 	vps       *vpsState
 	startedAt time.Time
-	coreDied  chan error
+	fullToken string
 
-	mu        sync.Mutex // held across mode switches and reloads
-	mode      string
-	core      runningCore
-	ruleSet   rules.Set
-	sources   []rules.Source
-	ctrlRules []ctrlRule
-	warnings  []string
-	events    []Event
+	wg      sync.WaitGroup // background loops; Run waits for them
+	applyMu sync.Mutex     // serializes rule applies; never held with d.mu across I/O
+
+	mu             sync.Mutex // guards everything below
+	runtime        verge.Runtime
+	runtimeErr     string
+	strip          verge.Patch // what the runtime config carries of this daemon's earlier patch
+	mihomoVersion  string      // empty while mihomo is unreachable
+	liveMode       string      // the core's running mode, which may differ from the runtime config's
+	ruleSet        rules.Set
+	compiled       rules.Compiled
+	ctrlRules      []ctrlRule
+	sources        []rules.Source // provenance per entry of ctrlRules
+	rulesActive    bool           // the running core has this daemon's rules at the front
+	pendingRestart bool           // the Merge file changed but the core couldn't be hot-loaded
+	warnings       []string
+	events         []Event
+	appRunning     bool
+	app            *verge.App
+	webUI          bool
+	appChecked     time.Time
 
 	ifaceMu   sync.Mutex
 	defIface  string
@@ -81,57 +93,48 @@ type Event struct {
 	Message string    `json:"message"`
 }
 
-type runningCore interface {
-	PID() int
-	Exited() <-chan struct{} // nil if the daemon can't observe the process
-	Stop(ctx context.Context) string
-}
-
-// Run starts the instance and blocks until ctx is cancelled or the core
-// dies. The core is always stopped, and the network restored, before Run
-// returns.
+// Run starts the companion and blocks until ctx is cancelled. Clash Verge
+// not running is not an error: the daemon waits for it.
 func Run(ctx context.Context, o Options) error {
-	secret, err := randomHex(32)
+	if o.Runner == nil {
+		o.Runner = netstate.ExecRunner{}
+	}
+	if o.Log == nil {
+		o.Log = log.New(os.Stderr, "", log.LstdFlags)
+	}
+	if err := os.MkdirAll(o.Home, 0o700); err != nil {
+		return err
+	}
+	d := newDaemon(o)
+	set, err := rules.Load(d.path("rules.yaml"))
 	if err != nil {
 		return err
 	}
-	inst := o.Instance
-	if err := os.MkdirAll(inst.Dir, 0o700); err != nil {
-		return err
-	}
-	d := &Daemon{
-		o: o, inst: inst,
-		ctrl:      controller{addr: fmt.Sprintf("127.0.0.1:%d", inst.ControllerPort), secret: secret},
-		tracker:   NewTracker(),
-		proposals: LoadProposals(inst.Path("proposals.json")),
-		health:    health.LoadHistory(inst.Path("health.json")),
-		coreDied:  make(chan error, 1),
-	}
-	d.initTraffic()
-	d.initVPS()
+	d.ruleSet = set
 
 	// Claim the GUI port first so a port clash fails before anything changes.
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", inst.GUIPort))
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", o.GUIPort))
 	if err != nil {
 		return fmt.Errorf("GUI port: %w", err)
 	}
 	defer ln.Close()
-	full, err := gui.LoadOrCreateToken(inst.Path("gui-token"))
+	full, err := gui.LoadOrCreateToken(d.path("gui-token"))
 	if err != nil {
 		return err
 	}
-	agent, err := gui.LoadOrCreateToken(inst.Path("mcp-token"))
+	agent, err := gui.LoadOrCreateToken(d.path("mcp-token"))
 	if err != nil {
 		return err
 	}
+	d.fullToken = full
 
 	d.mu.Lock()
-	err = d.start(ctx, o.Mode)
-	d.mu.Unlock()
-	if err != nil {
-		return err
+	d.refreshRuntime()
+	d.recompile()
+	if d.runtimeErr != "" {
+		d.event("Clash Verge: %s", d.runtimeErr)
 	}
-	defer d.shutdown()
+	d.mu.Unlock()
 
 	d.startedAt = time.Now()
 	srv := &http.Server{
@@ -145,236 +148,489 @@ func Run(ctx context.Context, o Options) error {
 		srv.Shutdown(sctx)
 	}()
 
+	if err := writeState(d.home, State{
+		PID: os.Getpid(), GUIURL: fmt.Sprintf("http://127.0.0.1:%d/", o.GUIPort),
+		VergeDir: string(o.Verge), StartedAt: d.startedAt,
+	}); err != nil {
+		return err
+	}
+	defer removeState(d.home)
+
+	d.spawn(func() { d.pollConnections(ctx) })
+	d.spawn(func() { d.followLogs(ctx) })
+	d.spawn(func() { d.monitorHealth(ctx) })
+	d.spawn(func() { d.pollTraffic(ctx) })
+	d.spawn(func() { d.monitorMachines(ctx) })
+	d.watchCore(ctx)
+	d.logf("shutting down")
+	d.wg.Wait()
+	return nil
+}
+
+// spawn runs f in a goroutine that Run waits for.
+func (d *Daemon) spawn(f func()) {
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		f()
+	}()
+}
+
+func newDaemon(o Options) *Daemon {
+	d := &Daemon{
+		o: o, home: o.Home,
+		ctrl:      &controller{},
+		tracker:   NewTracker(),
+		proposals: LoadProposals(filepath.Join(o.Home, "proposals.json")),
+		health:    health.LoadHistory(filepath.Join(o.Home, "health.json")),
+	}
+	d.initTraffic()
+	d.initVPS()
+	return d
+}
+
+// path joins elem onto the data directory.
+func (d *Daemon) path(elem ...string) string {
+	return filepath.Join(append([]string{d.home}, elem...)...)
+}
+
+func (d *Daemon) runner() netstate.Runner {
+	if d.o.Runner != nil {
+		return d.o.Runner
+	}
+	return netstate.ExecRunner{}
+}
+
+// watchCore keeps the controller pointed at Verge's mihomo. Verge rewrites
+// its runtime config on every apply, possibly with a new socket path or
+// secret, so the file is re-read whenever it changes, and the core is
+// pinged every couple of seconds so the GUI can say whether it is there.
+func (d *Daemon) watchCore(ctx context.Context) {
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	var lastMod time.Time
+	for {
+		d.checkCore(ctx, &lastMod)
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+func (d *Daemon) checkCore(ctx context.Context, lastMod *time.Time) {
+	changed := false
+	if info, err := os.Stat(d.o.Verge.Path(verge.RuntimeFile)); err == nil && !info.ModTime().Equal(*lastMod) {
+		*lastMod = info.ModTime()
+		changed = true
+		d.mu.Lock()
+		d.refreshRuntime()
+		d.mu.Unlock()
+	}
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	v, err := d.ctrl.version(cctx)
+	cancel()
+
 	d.mu.Lock()
-	err = d.saveState()
+	defer d.mu.Unlock()
+	was := d.mihomoVersion
+	if err != nil {
+		if was != "" {
+			d.event("mihomo is no longer reachable (%v); waiting for Clash Verge", err)
+		}
+		d.mihomoVersion = ""
+		// The socket may have appeared since (Verge's service creates it
+		// after the app writes its config), so pick the endpoint again.
+		d.refreshRuntime()
+		return
+	}
+	d.mihomoVersion = v
+	if was == "" {
+		d.event("connected to mihomo %s via %s", v, d.ctrl.endpoint())
+	}
+	mctx, mcancel := context.WithTimeout(ctx, 2*time.Second)
+	if m, err := d.ctrl.mode(mctx); err == nil && m != "" {
+		d.liveMode = m
+	}
+	mcancel()
+	if was == "" || changed {
+		d.refreshRules(ctx)
+	}
+	// Verge rebuilt its config (a restart, a profile switch) and the user's
+	// rules aren't in it: a Script profile that assigns config.rules drops
+	// the Merge file's rules. The user asked for these rules once; put
+	// them back without making them click.
+	if (was == "" || changed) && !d.rulesActive && d.hasUserConfig() {
+		d.spawn(func() {
+			if err := d.ReloadConfig(ctx); err != nil {
+				d.mu.Lock()
+				d.event("couldn't restore the rules after Clash Verge rebuilt its config: %v", err)
+				d.mu.Unlock()
+			}
+		})
+	}
+}
+
+// Modes the core can run in.
+var Modes = []string{"rule", "global", "direct"}
+
+// SetMode switches the running core's mode. This is the same switch as
+// in Verge's own window and takes effect at once, but Verge keeps the
+// mode in its own settings: the next time it rebuilds its config (a
+// restart, a profile switch) the mode comes back from there.
+func (d *Daemon) SetMode(ctx context.Context, mode string) error {
+	if !slices.Contains(Modes, mode) {
+		return fmt.Errorf("unknown mode %q (want rule, global, or direct)", mode)
+	}
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := d.ctrl.setMode(cctx, mode); err != nil {
+		return err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.liveMode = mode
+	d.event("mode switched to %s in the running core", mode)
+	return nil
+}
+
+// hasUserConfig reports whether the user has anything of their own to
+// apply: rules, packs, groups, or imported nodes. Without any, nothing is
+// ever pushed into Verge's core unasked. The caller holds d.mu.
+func (d *Daemon) hasUserConfig() bool {
+	if len(d.ruleSet.Rules) > 0 || len(d.ruleSet.Packs) > 0 || len(d.ruleSet.Groups) > 0 {
+		return true
+	}
+	nodes, _ := vps.LoadNodes(d.path("nodes.yaml"))
+	return len(nodes) > 0
+}
+
+// refreshRuntime re-reads Verge's runtime config and repoints the
+// controller. The caller holds d.mu.
+func (d *Daemon) refreshRuntime() {
+	rt, err := d.o.Verge.ReadRuntime()
+	if err != nil {
+		d.runtimeErr = err.Error()
+		return
+	}
+	d.runtime = rt
+	// What Verge folded into this config is the Merge file as it stands
+	// now (Verge rebuilt the config just before this read), so that is what
+	// has to be taken back out before this daemon's patch goes on top.
+	d.strip = verge.Patch{}
+	if mergePath, err := d.o.Verge.MergeFile(); err == nil {
+		if prev, err := verge.ReadMerge(mergePath); err == nil {
+			d.strip = prev
+		}
+	}
+	ep, err := rt.Endpoint()
+	if err != nil {
+		d.runtimeErr = err.Error()
+		return
+	}
+	d.runtimeErr = ""
+	d.ctrl.set(ep)
+}
+
+// recompile refreshes the compiled form of the rule set. The caller holds d.mu.
+func (d *Daemon) recompile() {
+	c, err := rules.Compile(d.ruleSet)
+	if err != nil {
+		d.warnings = append(d.warnings, "rules.yaml: "+err.Error())
+		return
+	}
+	d.compiled = c
+}
+
+// vergeState reports whether the Clash Verge app is up, which copy is
+// installed, and whether the GUI is in Verge's Web UI list, cached
+// briefly because the GUI asks every couple of seconds.
+func (d *Daemon) vergeState(ctx context.Context) (running bool, app *verge.App, webUI bool) {
+	d.mu.Lock()
+	fresh := time.Since(d.appChecked) < 5*time.Second
+	running, app, webUI = d.appRunning, d.app, d.webUI
+	d.mu.Unlock()
+	if fresh {
+		return running, app, webUI
+	}
+	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	running = verge.Running(cctx, d.runner())
+	app = nil
+	if a, err := verge.FindApp(cctx, d.runner()); err == nil {
+		app = &a
+	}
+	webUI = false
+	if st, err := d.o.Verge.ReadSettings(); err == nil {
+		webUI = slices.Contains(st.WebUIList, d.guiURL())
+	}
+	d.mu.Lock()
+	d.appRunning, d.app, d.webUI, d.appChecked = running, app, webUI, time.Now()
+	d.mu.Unlock()
+	return running, app, webUI
+}
+
+// guiURL is the dashboard's plain address, as it goes into Verge's list.
+func (d *Daemon) guiURL() string {
+	return fmt.Sprintf("http://127.0.0.1:%d/", d.o.GUIPort)
+}
+
+// Built-in outbounds every rule may target.
+var builtinTargets = []string{"DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE", "GLOBAL"}
+
+// patchInputs is a copy of the daemon state an apply needs, taken under
+// d.mu once so the lock is never held while files are written or the
+// core is reloaded.
+type patchInputs struct {
+	runtime    verge.Runtime
+	runtimeErr string
+	strip      verge.Patch
+	reachable  bool
+	ruleSet    rules.Set
+	liveMode   string
+}
+
+func (d *Daemon) inputs() patchInputs {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return patchInputs{runtime: d.runtime, runtimeErr: d.runtimeErr, strip: d.strip, reachable: d.mihomoVersion != "", ruleSet: d.ruleSet, liveMode: d.liveMode}
+}
+
+// buildPatch compiles set and assembles what goes into Verge's config:
+// the rules, the imported nodes, the interface-bound outbounds, and the
+// failover groups. Every rule target and group member must exist, either
+// in the Verge profile that is running or in the patch itself; otherwise
+// Verge's next apply would fail and leave the user without a proxy.
+func (d *Daemon) buildPatch(in patchInputs, set rules.Set) (rules.Compiled, verge.Patch, []string, error) {
+	c, err := rules.Compile(set)
+	if err != nil {
+		return rules.Compiled{}, verge.Patch{}, nil, err
+	}
+	if in.runtime.Config == nil {
+		return rules.Compiled{}, verge.Patch{}, nil, fmt.Errorf("Clash Verge's runtime config isn't readable (%s), so the rules can't be checked against its proxies", firstNonEmpty(in.runtimeErr, "not read yet"))
+	}
+	var warnings []string
+	nodes, err := vps.LoadNodes(d.path("nodes.yaml"))
+	if err != nil {
+		warnings = append(warnings, "imported nodes: "+err.Error())
+	}
+
+	// What the profile has on its own, with this daemon's earlier
+	// contribution taken back out.
+	base := verge.Strip(in.runtime.Config, in.strip)
+	profileProxies, profileGroups := verge.Runtime{Config: base}.Names()
+	known := map[string]bool{}
+	for _, n := range slices.Concat(builtinTargets, profileProxies, profileGroups) {
+		known[n] = true
+	}
+
+	p := verge.Patch{Rules: c.Rules, NameserverPolicy: c.NameserverPolicy}
+	for _, px := range slices.Concat(vps.Proxies(nodes), c.Proxies) {
+		name, _ := px["name"].(string)
+		if known[name] {
+			warnings = append(warnings, fmt.Sprintf("imported node %q skipped: your Clash Verge profile already has a proxy with that name", name))
+			continue
+		}
+		known[name] = true
+		p.Proxies = append(p.Proxies, px)
+	}
+	for _, g := range c.Groups {
+		name, _ := g["name"].(string)
+		if known[name] {
+			warnings = append(warnings, fmt.Sprintf("group %q skipped: your Clash Verge profile already has a proxy or group with that name", name))
+			continue
+		}
+		known[name] = true
+		p.Groups = append(p.Groups, g)
+	}
+	for _, g := range p.Groups {
+		members, _ := g["proxies"].([]any)
+		for _, m := range members {
+			if s, _ := m.(string); !known[s] {
+				return rules.Compiled{}, verge.Patch{}, nil, fmt.Errorf("group %v: member %q is not a proxy or group in your Clash Verge profile", g["name"], s)
+			}
+		}
+	}
+	for _, line := range c.Rules {
+		if _, target := splitRuleLine(line); !known[target] {
+			return rules.Compiled{}, verge.Patch{}, nil, fmt.Errorf("rule %q: %q is not a proxy or group in your Clash Verge profile", line, target)
+		}
+	}
+	return c, p, warnings, nil
+}
+
+// syncResult is what an apply found out, stored under d.mu afterwards.
+type syncResult struct {
+	pending bool // the Merge file is ahead of the core
+	events  []string
+}
+
+// rejected reports whether an HTTP status from the core means it refused
+// the config (as opposed to not being the core we think it is, or being
+// in trouble): a 400-class reply other than auth and routing errors.
+func rejected(status int) bool {
+	return status >= 400 && status < 500 && status != http.StatusUnauthorized && status != http.StatusForbidden && status != http.StatusNotFound
+}
+
+// syncVerge writes the patch to Verge's Merge profile and hot-loads it
+// into the running core. A core that rejects the config means Verge
+// would reject it too, so the Merge file is put back and the error
+// returned. A core that can't be reached keeps the Merge file: the rules
+// apply when Verge next starts. No lock is held: this does file I/O and
+// an HTTP call that may take a while.
+func (d *Daemon) syncVerge(ctx context.Context, in patchInputs, p verge.Patch) (syncResult, error) {
+	mergePath, err := d.o.Verge.MergeFile()
+	if err != nil {
+		return syncResult{}, err
+	}
+	prev, prevErr := verge.ReadMerge(mergePath)
+	if err := verge.WriteMerge(mergePath, p); err != nil {
+		return syncResult{}, fmt.Errorf("write Clash Verge's merge profile: %w", err)
+	}
+	if in.runtime.Config == nil || !in.reachable {
+		return syncResult{pending: true, events: []string{"rules saved to Clash Verge's merge profile; they apply when Clash Verge starts"}}, nil
+	}
+	cfg, _ := verge.Apply(verge.Strip(in.runtime.Config, in.strip), p)
+	// The runtime config carries the mode Verge last applied; a mode the
+	// user switched since (here or in Verge) must survive the reload.
+	if in.liveMode != "" {
+		cfg["mode"] = in.liveMode
+	}
+	payload, err := yaml.Marshal(cfg)
+	if err != nil {
+		return syncResult{}, err
+	}
+	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := d.ctrl.reloadPayload(rctx, payload); err != nil {
+		var herr *ctrlHTTPError
+		if errors.As(err, &herr) && rejected(herr.Status) {
+			rerr := fmt.Errorf("mihomo rejected the config: %s", herr.Msg)
+			if prevErr != nil {
+				return syncResult{}, fmt.Errorf("%w (and the merge profile couldn't be restored: it was unreadable before: %v)", rerr, prevErr)
+			}
+			if werr := verge.WriteMerge(mergePath, prev); werr != nil {
+				return syncResult{}, fmt.Errorf("%w (and restoring the merge profile failed: %v)", rerr, werr)
+			}
+			return syncResult{}, rerr
+		}
+		return syncResult{pending: true, events: []string{fmt.Sprintf("couldn't hot-load the rules (%v); they are saved in Clash Verge's merge profile and apply when Clash Verge restarts", err)}}, nil
+	}
+	return syncResult{events: []string{"rules loaded into the running mihomo and saved to Clash Verge's merge profile"}}, nil
+}
+
+// finishSync records an apply's outcome. The caller holds d.mu.
+func (d *Daemon) finishSync(ctx context.Context, res syncResult) {
+	for _, e := range res.events {
+		d.event("%s", e)
+	}
+	d.pendingRestart = res.pending
+	if res.pending {
+		d.rulesActive = false
+		return
+	}
+	d.refreshRules(ctx)
+}
+
+// ApplyChange applies a change to the current rule set. Reading the set,
+// applying the change, and saving happen under one apply lock, so two
+// changes at once can't be built from the same base.
+func (d *Daemon) ApplyChange(ctx context.Context, c rules.Change) error {
+	d.applyMu.Lock()
+	defer d.applyMu.Unlock()
+	d.mu.Lock()
+	next, err := d.ruleSet.Apply(c)
 	d.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	defer removeState(inst)
-
-	go d.pollConnections(ctx)
-	go d.followLogs(ctx)
-	go d.monitorHealth(ctx)
-	go d.pollTraffic(ctx)
-	go d.monitorMachines(ctx)
-
-	health := time.NewTicker(2 * time.Second)
-	defer health.Stop()
-	failures := 0
-	for {
-		select {
-		case <-ctx.Done():
-			d.logf("shutting down")
-			return nil
-		case err := <-d.coreDied:
-			return err
-		case <-health.C:
-			hctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-			_, err := d.ctrl.version(hctx)
-			cancel()
-			if err == nil {
-				failures = 0
-				continue
-			}
-			if failures++; failures >= 5 {
-				return fmt.Errorf("mihomo stopped responding: %v", err)
-			}
-		}
-	}
+	return d.applyRules(ctx, next)
 }
 
-// start brings the core up in mode. The caller holds d.mu.
-func (d *Daemon) start(ctx context.Context, mode string) error {
-	set, err := rules.Load(d.inst.Path("rules.yaml"))
-	if err != nil {
-		return err
-	}
-	res, err := d.build(mode, set)
-	if err != nil {
-		return err
-	}
-	for _, w := range res.Warnings {
-		d.logf("config: %s", w)
-	}
-
-	var core runningCore
-	if mode == runtimecfg.ModeTUN {
-		bin, err := os.Open(d.o.CorePath)
-		if err != nil {
-			return err
-		}
-		var r helper.TUNStartResult
-		err = d.helperCall(ctx, "tun-start", helper.TUNStartArgs{Instance: d.inst.Name, Config: string(res.Config)}, &r, bin)
-		bin.Close()
-		if err != nil {
-			return fmt.Errorf("start TUN: %w", err)
-		}
-		core = &helperCore{d: d, pid: r.CorePID}
-	} else {
-		if err := os.WriteFile(d.inst.Path("runtime.yaml"), res.Config, 0o600); err != nil {
-			return err
-		}
-		lc, err := d.startLocal()
-		if err != nil {
-			return err
-		}
-		core = lc
-	}
-
-	if err := d.ctrl.waitReady(ctx, core.Exited(), 15*time.Second); err != nil {
-		core.Stop(context.Background())
-		return fmt.Errorf("%w (see %s)", err, d.coreLog(mode))
-	}
-	if mode == runtimecfg.ModeSystemProxy {
-		if err := d.helperCall(ctx, "sysproxy-set", helper.InstanceArgs{Instance: d.inst.Name}, nil); err != nil {
-			core.Stop(context.Background())
-			return fmt.Errorf("set system proxy: %w", err)
-		}
-	}
-
-	d.mode, d.core, d.ruleSet, d.sources, d.warnings = mode, core, set, res.Sources, res.Warnings
-	d.refreshRules(ctx)
-	d.event("started in %s mode (core pid %d)", mode, core.PID())
-	return nil
-}
-
-// stop takes the core down and undoes system changes. The caller holds d.mu.
-func (d *Daemon) stop(ctx context.Context) {
-	if d.core == nil {
-		return
-	}
-	if d.mode == runtimecfg.ModeSystemProxy {
-		var ev helper.Event
-		if err := d.helperCall(ctx, "sysproxy-clear", helper.InstanceArgs{Instance: d.inst.Name}, &ev); err != nil {
-			d.event("clearing system proxy failed: %v (the helper restores it when this daemon exits)", err)
-		} else {
-			d.event("%s", ev.Message)
-		}
-	}
-	if note := d.core.Stop(ctx); note != "" {
-		d.event("%s", note)
-	}
-	d.core = nil
-	d.tracker.Reset()
-}
-
-func (d *Daemon) shutdown() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	d.stop(ctx)
-}
-
-// SetMode restarts the core in a new mode, falling back to the previous
-// mode if the new one fails.
-func (d *Daemon) SetMode(ctx context.Context, mode string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if mode == d.mode && d.core != nil {
-		return nil
-	}
-	prev := d.mode
-	d.stop(ctx)
-	if err := d.start(ctx, mode); err != nil {
-		d.event("switching to %s failed: %v; returning to %s", mode, err, prev)
-		if err2 := d.start(ctx, prev); err2 != nil {
-			select {
-			case d.coreDied <- fmt.Errorf("could not restore %s mode: %w", prev, err2):
-			default:
-			}
-		}
-		return err
-	}
-	return d.saveState()
-}
-
-// ApplyRules validates, saves, and hot-reloads a new rule set.
+// ApplyRules validates, saves, and applies a whole new rule set.
 func (d *Daemon) ApplyRules(ctx context.Context, set rules.Set) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	res, err := d.build(d.mode, set)
+	d.applyMu.Lock()
+	defer d.applyMu.Unlock()
+	return d.applyRules(ctx, set)
+}
+
+// applyRules does the work of ApplyRules. The caller holds d.applyMu.
+func (d *Daemon) applyRules(ctx context.Context, set rules.Set) error {
+	in := d.inputs()
+	c, p, warnings, err := d.buildPatch(in, set)
 	if err != nil {
 		return err
 	}
-	path := d.inst.Path("rules.yaml")
-	old, _ := rules.Load(path)
+	path := d.path("rules.yaml")
 	if err := rules.Save(path, set); err != nil {
 		return err
 	}
-	if err := d.reload(ctx, res.Config); err != nil {
-		rules.Save(path, old)
+	res, err := d.syncVerge(ctx, in, p)
+	if err != nil {
+		if rerr := rules.Save(path, in.ruleSet); rerr != nil {
+			err = fmt.Errorf("%w (and restoring rules.yaml failed: %v)", err, rerr)
+		}
 		return err
 	}
-	d.ruleSet, d.sources, d.warnings = set, res.Sources, res.Warnings
-	d.refreshRules(ctx)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.ruleSet, d.compiled, d.warnings = set, c, warnings
+	d.finishSync(ctx, res)
 	d.event("rules updated: %d user rules, packs %v", len(set.Rules), set.Packs)
 	return nil
 }
 
-// ReloadConfig rebuilds the runtime config from the saved rules and
-// imported nodes and hot-reloads it, e.g. after a node was imported.
+// ReloadConfig re-applies the saved rules and imported nodes, e.g. after
+// a node was imported or removed, or when the user asks for the rules to
+// be pushed into the core again.
 func (d *Daemon) ReloadConfig(ctx context.Context) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	res, err := d.build(d.mode, d.ruleSet)
+	d.applyMu.Lock()
+	defer d.applyMu.Unlock()
+	in := d.inputs()
+	c, p, warnings, err := d.buildPatch(in, in.ruleSet)
 	if err != nil {
 		return err
 	}
-	if err := d.reload(ctx, res.Config); err != nil {
+	res, err := d.syncVerge(ctx, in, p)
+	if err != nil {
 		return err
 	}
-	d.sources, d.warnings = res.Sources, res.Warnings
-	d.refreshRules(ctx)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.compiled, d.warnings = c, warnings
+	d.finishSync(ctx, res)
 	return nil
 }
 
-func (d *Daemon) reload(ctx context.Context, cfg []byte) error {
-	if d.mode == runtimecfg.ModeTUN {
-		return d.helperCall(ctx, "tun-reload", helper.TUNReloadArgs{Instance: d.inst.Name, Config: string(cfg)}, nil)
-	}
-	path := d.inst.Path("runtime.yaml")
-	if err := os.WriteFile(path, cfg, 0o600); err != nil {
+// RestartVerge quits and relaunches Clash Verge so it rebuilds its config
+// from the profiles, including the Merge file this daemon writes.
+func (d *Daemon) RestartVerge(ctx context.Context) error {
+	err := verge.Restart(ctx, d.runner())
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err != nil {
+		d.event("restarting Clash Verge failed: %v", err)
 		return err
 	}
-	return d.ctrl.reload(ctx, path)
-}
-
-// build renders the runtime config for mode and set.
-func (d *Daemon) build(mode string, set rules.Set) (runtimecfg.Result, error) {
-	user, err := os.ReadFile(d.o.ConfigPath)
-	if err != nil {
-		return runtimecfg.Result{}, err
-	}
-	compiled, err := rules.Compile(set)
-	if err != nil {
-		return runtimecfg.Result{}, err
-	}
-	var extra []map[string]any
-	if nodes, err := vps.LoadNodes(d.inst.Path("nodes.yaml")); err == nil {
-		extra = vps.Proxies(nodes)
-	}
-	return runtimecfg.Build(user, runtimecfg.Options{ExtraProxies: extra,
-		MixedPort: d.inst.MixedPort, ControllerPort: d.inst.ControllerPort, Secret: d.ctrl.secret,
-		Mode: mode, TUNDevice: d.inst.TUNDevice, TUNAddress: d.inst.TUNAddress, RouteAddress: d.o.RouteAddress, Rules: &compiled,
-	})
+	d.pendingRestart = false
+	d.appChecked = time.Time{}
+	d.event("Clash Verge restarted")
+	return nil
 }
 
 // Propose records a rule change for a person to confirm, after checking
 // that it would produce a valid config.
 func (d *Daemon) Propose(origin, summary string, change rules.Change) (*Proposal, error) {
-	d.mu.Lock()
-	current, mode := d.ruleSet, d.mode
-	d.mu.Unlock()
-	next, err := current.Apply(change)
+	in := d.inputs()
+	next, err := in.ruleSet.Apply(change)
+	if err == nil {
+		_, _, _, err = d.buildPatch(in, next)
+	}
 	if err != nil {
 		return nil, err
 	}
-	if _, err := d.build(mode, next); err != nil {
-		return nil, err
-	}
-	diff, err := current.Diff(change)
+	diff, err := in.ruleSet.Diff(change)
 	if err != nil {
 		return nil, err
 	}
@@ -390,22 +646,71 @@ func (d *Daemon) Propose(origin, summary string, change rules.Change) (*Proposal
 // Decide applies or rejects a proposal.
 func (d *Daemon) Decide(ctx context.Context, id string, accept bool) (Proposal, error) {
 	return d.proposals.Decide(id, accept, func(c rules.Change) error {
-		d.mu.Lock()
-		next, err := d.ruleSet.Apply(c)
-		d.mu.Unlock()
-		if err != nil {
-			return err
-		}
-		return d.ApplyRules(ctx, next)
+		return d.ApplyChange(ctx, c)
 	})
 }
 
+// refreshRules reads the core's rule list and works out whether this
+// daemon's rules are at the front of it. The caller holds d.mu.
 func (d *Daemon) refreshRules(ctx context.Context) {
 	rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	if r, err := d.ctrl.rules(rctx); err == nil {
-		d.ctrlRules = r
+	r, err := d.ctrl.rules(rctx)
+	if err != nil {
+		return
 	}
+	d.ctrlRules = r
+	d.rulesActive, d.sources = alignSources(r, d.compiled)
+	if d.rulesActive {
+		d.pendingRestart = false // the user restarted Verge themselves, or it re-applied
+	}
+}
+
+// alignSources matches the core's rule list against the compiled rules.
+// When the compiled rules are the first entries, they are labeled with
+// their sources and the rest with the profile's; otherwise (Verge hasn't
+// applied the Merge file, or a script rewrote the rules) everything is
+// the profile's.
+func alignSources(ctrl []ctrlRule, c rules.Compiled) (active bool, sources []rules.Source) {
+	sources = make([]rules.Source, len(ctrl))
+	n := len(c.Rules)
+	active = len(ctrl) >= n
+	for i := 0; i < n && active; i++ {
+		payload, target := splitRuleLine(c.Rules[i])
+		if ctrl[i].Payload != payload || ctrl[i].Proxy != target {
+			active = false
+		}
+	}
+	start := 0
+	if active {
+		copy(sources, c.Sources)
+		start = n
+	}
+	for i := start; i < len(ctrl); i++ {
+		sources[i] = rules.Source{Kind: "config", Index: i - start + 1}
+	}
+	return active, sources
+}
+
+// splitRuleLine returns the payload and target of a mihomo rule line.
+func splitRuleLine(line string) (payload, target string) {
+	_, rest, ok := strings.Cut(line, ",")
+	if !ok {
+		return "", ""
+	}
+	rest = strings.TrimSuffix(rest, ",no-resolve")
+	i := strings.LastIndex(rest, ",")
+	if i < 0 {
+		return "", rest // MATCH,TARGET
+	}
+	return rest[:i], rest[i+1:]
+}
+
+// tunDevice is Verge's TUN device name, whether or not TUN is on.
+func (d *Daemon) tunDevice() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.runtime.TUNDevice
 }
 
 func (d *Daemon) pollConnections(ctx context.Context) {
@@ -428,7 +733,9 @@ func (d *Daemon) pollConnections(ctx context.Context) {
 
 func (d *Daemon) followLogs(ctx context.Context) {
 	for ctx.Err() == nil {
-		d.ctrl.streamLogs(ctx, "warning", d.tracker.AddLog)
+		if d.ctrl.ready() {
+			d.ctrl.streamLogs(ctx, "warning", d.tracker.AddLog)
+		}
 		select {
 		case <-ctx.Done():
 		case <-time.After(2 * time.Second):
@@ -448,33 +755,6 @@ func (d *Daemon) defaultInterface(ctx context.Context) string {
 	return d.defIface
 }
 
-func (d *Daemon) helperCall(ctx context.Context, cmd string, args, out any, files ...*os.File) error {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-	return helper.Call(ctx, d.o.HelperSocket, cmd, args, out, files...)
-}
-
-// saveState records the running instance. The caller holds d.mu.
-func (d *Daemon) saveState() error {
-	pid := 0
-	if d.core != nil {
-		pid = d.core.PID()
-	}
-	return writeState(d.inst, State{
-		Instance: d.inst.Name, PID: os.Getpid(), CorePID: pid, Mode: d.mode,
-		CoreVersion: d.o.CoreVersion, ConfigPath: d.o.ConfigPath,
-		MixedPort: d.inst.MixedPort, ControllerPort: d.inst.ControllerPort,
-		GUIURL: fmt.Sprintf("http://127.0.0.1:%d/", d.inst.GUIPort), StartedAt: d.startedAt,
-	})
-}
-
-func (d *Daemon) coreLog(mode string) string {
-	if mode == runtimecfg.ModeTUN {
-		return "the helper's log for " + d.inst.Name
-	}
-	return d.inst.Path("mihomo.log")
-}
-
 // event records something for the GUI. The caller holds d.mu.
 func (d *Daemon) event(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
@@ -485,80 +765,8 @@ func (d *Daemon) event(format string, args ...any) {
 	}
 }
 
-func (d *Daemon) logf(format string, args ...any) { d.o.Log.Printf(format, args...) }
-
-// localCore is mihomo running as the user under the core-exec wrapper.
-type localCore struct {
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	exited   chan struct{}
-	stopping atomic.Bool
-}
-
-func (d *Daemon) startLocal() (*localCore, error) {
-	logf, err := os.OpenFile(d.inst.Path("mihomo.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, err
+func (d *Daemon) logf(format string, args ...any) {
+	if d.o.Log != nil {
+		d.o.Log.Printf(format, args...)
 	}
-	defer logf.Close()
-	cmd := exec.Command(d.o.Exe, "core-exec", d.o.CorePath, "-d", d.inst.Dir, "-f", d.inst.Path("runtime.yaml"))
-	cmd.Stdout, cmd.Stderr = logf, logf
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, err
-	}
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start mihomo: %w", err)
-	}
-	c := &localCore{cmd: cmd, stdin: stdin, exited: make(chan struct{})}
-	go func() {
-		err := cmd.Wait()
-		close(c.exited)
-		if !c.stopping.Load() {
-			select {
-			case d.coreDied <- fmt.Errorf("mihomo exited unexpectedly: %v (see %s)", err, d.inst.Path("mihomo.log")):
-			default:
-			}
-		}
-	}()
-	return c, nil
-}
-
-func (c *localCore) PID() int                { return c.cmd.Process.Pid }
-func (c *localCore) Exited() <-chan struct{} { return c.exited }
-func (c *localCore) Stop(context.Context) string {
-	c.stopping.Store(true)
-	c.stdin.Close() // the wrapper stops mihomo on EOF
-	c.cmd.Process.Signal(syscall.SIGTERM)
-	select {
-	case <-c.exited:
-	case <-time.After(8 * time.Second):
-		c.cmd.Process.Kill()
-		<-c.exited
-	}
-	return "mihomo stopped"
-}
-
-// helperCore is mihomo running as root under the privileged helper.
-type helperCore struct {
-	d   *Daemon
-	pid int
-}
-
-func (c *helperCore) PID() int                { return c.pid }
-func (c *helperCore) Exited() <-chan struct{} { return nil }
-func (c *helperCore) Stop(ctx context.Context) string {
-	var ev helper.Event
-	if err := c.d.helperCall(ctx, "tun-stop", helper.InstanceArgs{Instance: c.d.inst.Name}, &ev); err != nil {
-		return fmt.Sprintf("stopping TUN via the helper failed: %v (the helper stops it when this daemon exits)", err)
-	}
-	return ev.Message
-}
-
-func randomHex(n int) (string, error) {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
 }

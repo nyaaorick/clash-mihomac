@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nyaaorick/clash-mihomac/internal/health"
+	"github.com/nyaaorick/clash-mihomac/internal/verge"
 )
 
 func TestCheckNodesRecordsHealthyNodes(t *testing.T) {
@@ -31,12 +32,12 @@ func TestCheckNodesRecordsHealthyNodes(t *testing.T) {
 	defer srv.Close()
 
 	dir := t.TempDir()
-	cfg := filepath.Join(dir, "config.yaml")
-	os.WriteFile(cfg, []byte("proxies:\n  - {name: hk, type: ss, server: 192.0.2.1, port: 8388}\n  - {name: \"jp/1\", type: ss, server: 192.0.2.2, port: 8388}\n  - {name: d, type: direct}\n"), 0o600)
+	cfg := []byte("proxies:\n  - {name: hk, type: ss, server: 192.0.2.1, port: 8388}\n  - {name: \"jp/1\", type: ss, server: 192.0.2.2, port: 8388}\n  - {name: d, type: direct}\n")
 	d := &Daemon{
-		o:      Options{ConfigPath: cfg},
-		ctrl:   controller{addr: strings.TrimPrefix(srv.URL, "http://"), secret: "s3cret"},
-		health: health.LoadHistory(filepath.Join(dir, "health.json")),
+		home:    dir,
+		runtime: verge.Runtime{Raw: cfg},
+		ctrl:    tcpController(strings.TrimPrefix(srv.URL, "http://"), "s3cret"),
+		health:  health.LoadHistory(filepath.Join(dir, "health.json")),
 	}
 	// Stale nodes from an earlier config are forgotten.
 	d.health.Record(health.Check{Time: time.Now(), Node: "gone", OK: true})

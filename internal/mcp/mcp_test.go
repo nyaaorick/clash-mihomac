@@ -30,7 +30,7 @@ func (f *fakeAPI) Post(_ context.Context, path string, body, out any) error {
 func run(t *testing.T, api API, lines ...string) []map[string]any {
 	t.Helper()
 	var out bytes.Buffer
-	s := &Server{API: api, Instance: "debug", Version: "test"}
+	s := &Server{API: api, Version: "test"}
 	if err := s.Serve(context.Background(), strings.NewReader(strings.Join(lines, "\n")+"\n"), &out); err != nil {
 		t.Fatal(err)
 	}
